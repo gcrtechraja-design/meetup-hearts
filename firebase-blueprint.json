@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with coins, diamonds, and calling configuration",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone_number": { "type": "string" },
+        "age": { "type": "number" },
+        "gender": { "type": "string", "enum": ["male", "female", "other"] },
+        "location": { "type": "string" },
+        "bio": { "type": "string" },
+        "profile_pic": { "type": "string" },
+        "interests": { "type": "array" },
+        "language": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "listener", "admin"] },
+        "is_admin": { "type": "boolean" },
+        "coins_balance": { "type": "number" },
+        "diamonds_balance": { "type": "number" },
+        "voice_rate": { "type": "number" },
+        "video_rate": { "type": "number" },
+        "audio_rate_coins": { "type": "number" },
+        "video_rate_coins": { "type": "number" },
+        "status": { "type": "string", "enum": ["online", "offline", "busy"] },
+        "city": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "allowVideoCalls": { "type": "boolean" },
+        "fcm_token": { "type": "string" },
+        "fcm_token_updated_at": { "type": "string" },
+        "is_blocked": { "type": "boolean" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["uid", "name", "email", "role", "coins_balance", "is_blocked"]
+    },
+    "CallLog": {
+      "title": "CallLog",
+      "description": "Log entry for voice and video calling sessions",
+      "type": "object",
+      "properties": {
+        "caller_id": { "type": "string" },
+        "receiver_id": { "type": "string" },
+        "type": { "type": "string", "enum": ["voice", "video"] },
+        "duration_sec": { "type": "number" },
+        "coins_spent": { "type": "number" },
+        "started_at": { "type": "string" }
+      },
+      "required": ["caller_id", "receiver_id", "type", "duration_sec", "coins_spent"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Coin recharge transaction record",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "amount_inr": { "type": "number" },
+        "coins_credited": { "type": "number" },
+        "gateway_ref": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "success", "failed"] },
+        "created_at": { "type": "string" }
+      },
+      "required": ["user_id", "amount_inr", "coins_credited", "status"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "Safety report submitted by users",
+      "type": "object",
+      "properties": {
+        "reporter_id": { "type": "string" },
+        "reported_id": { "type": "string" },
+        "reason": { "type": "string" },
+        "description": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["reporter_id", "reported_id", "reason"]
+    },
+    "Block": {
+      "title": "Block",
+      "description": "Block relationship between users",
+      "type": "object",
+      "properties": {
+        "blocker_id": { "type": "string" },
+        "blocked_id": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["blocker_id", "blocked_id"]
+    },
+    "Bookmark": {
+      "title": "Bookmark",
+      "description": "Favorited listeners per user",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "favorited_user_id": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["user_id", "favorited_user_id"]
+    },
+    "ListenerApplication": {
+      "title": "ListenerApplication",
+      "description": "Application to become a listener",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "name": { "type": "string" },
+        "languages": { "type": "array" },
+        "experience": { "type": "string" },
+        "voice_rate": { "type": "number" },
+        "video_rate": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "created_at": { "type": "string" }
+      },
+      "required": ["user_id", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "All registered members, listeners and administrators"
+    },
+    "/call_logs/{logId}": {
+      "schema": "CallLog",
+      "description": "Calling history and coin consumption records"
+    },
+    "/transactions/{txId}": {
+      "schema": "Transaction",
+      "description": "Coin purchase payments"
+    },
+    "/reports/{reportId}": {
+      "schema": "Report",
+      "description": "Safety moderation reports"
+    },
+    "/blocks/{blockId}": {
+      "schema": "Block",
+      "description": "User blocking relationships"
+    },
+    "/blocked_users/{blockId}": {
+      "schema": "Block",
+      "description": "User blocking relationships"
+    },
+    "/user_favourites/{favId}": {
+      "schema": "Bookmark",
+      "description": "User favourite listeners"
+    },
+    "/bookmarks/{bookmarkId}": {
+      "schema": "Bookmark",
+      "description": "User favourite listeners"
+    },
+    "/listener_applications/{applicationId}": {
+      "schema": "ListenerApplication",
+      "description": "Listener onboarding requests"
+    },
+    "/calls/{callId}": {
+      "schema": "object",
+      "description": "Real-time call invitations and signaling"
+    }
+  }
+}

@@ -1,0 +1,2287 @@
+================================================================================
+MEET UP - CALL SYSTEM BACKUP
+Generated at: 2026-09-28T08:24:46.700Z
+================================================================================
+
+################################################################################
+FILE 1: src/services/webrtcService.ts
+################################################################################
+
+import { 
+  doc, 
+  updateDoc, 
+  onSnapshot, 
+  collection, 
+  addDoc, 
+  serverTimestamp
+} from 'firebase/firestore';
+import { db } from '../firebase/config';
+
+export interface WebRTCLogEntry {
+  id: string;
+  timestamp: string;
+  type: 'info' | 'warn' | 'error' | 'success' | 'signaling' | 'ice' | 'conn';
+  tag: string;
+  message: string;
+}
+
+export type WebRTCLogListener = (entry: WebRTCLogEntry) => void;
+
+export interface CandidateCounts {
+  host: number;
+  srflx: number;
+  relay: number;
+  total: number;
+}
+
+/**
+ * Public STUN servers for NAT traversal & srflx candidate discovery
+ * Configured with 4 reliable STUN servers as required.
+ */
+export const STUN_SERVERS: RTCIceServer[] = [
+  {
+    urls: [
+      'stun:stun.l.google.com:19302',
+      'stun:stun1.l.google.com:19302',
+      'stun:stun2.l.google.com:19302',
+      'stun:global.stun.twilio.com:3478',
+    ],
+  },
+];
+
+/**
+ * Free TURN server for NAT traversal (OpenRelay / Metered)
+ * Configured with working URLs and credentials. TURN is treated as an optional fallback.
+ */
+export const TURN_SERVERS: (RTCIceServer & { password?: string })[] = [
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+    password: 'openrelayproject',
+  },
+];
+
+/**
+ * Primary WebRTC Configuration with STUN (4 servers) and optional TURN fallback
+ */
+export const RTC_CONFIGURATION: RTCConfiguration = {
+  iceServers: [
+    ...STUN_SERVERS,
+    ...TURN_SERVERS,
+  ],
+  iceCandidatePoolSize: 10,
+};
+
+/**
+ * STUN-only fallback configuration in case TURN is unreachable or fails DNS resolution
+ */
+export const STUN_ONLY_CONFIGURATION: RTCConfiguration = {
+  iceServers: STUN_SERVERS,
+  iceCandidatePoolSize: 10,
+};
+
+export interface WebRTCSessionOptions {
+  callId: string;
+  isCaller: boolean;
+  isVideo: boolean;
+  localStream: MediaStream;
+  onRemoteStream: (stream: MediaStream) => void;
+  onCallEnded: (reason: string) => void;
+  onLog: (entry: WebRTCLogEntry) => void;
+  onCandidateCountsChange?: (counts: CandidateCounts) => void;
+}
+
+export class WebRTCSession {
+  public pc: RTCPeerConnection;
+  private callId: string;
+  private isCaller: boolean;
+  private isVideo: boolean;
+  private localStream: MediaStream;
+  private remoteStream: MediaStream | null = null;
+  private onRemoteStream: (stream: MediaStream) => void;
+  private onCallEnded: (reason: string) => void;
+  private onLog: (entry: WebRTCLogEntry) => void;
+  private onCandidateCountsChange?: (counts: CandidateCounts) => void;
+  
+  // 15-second grace timer for 'failed' state (Requirement 3)
+  private failedTimer: any = null;
+
+  // Active Firestore listeners - kept alive until destroy (Requirement 1)
+  private unsubCallDoc: (() => void) | null = null;
+  private unsubCandidates: (() => void) | null = null;
+
+  // Candidate queuing before remote description is set (Requirement 1)
+  private remoteCandidatesQueue: RTCIceCandidateInit[] = [];
+  private remoteDescriptionSet = false;
+  private appliedCandidateKeys = new Set<string>();
+  private destroyed = false;
+
+  // ICE Candidate Tracking for host/srflx/relay (Requirement 2 & 6)
+  private candidateCounts: CandidateCounts = {
+    host: 0,
+    srflx: 0,
+    relay: 0,
+    total: 0,
+  };
+  private hasSrflxCandidate = false;
+  private hasRelayCandidate = false;
+  private onSrflxListeners: (() => void)[] = [];
+
+  constructor(options: WebRTCSessionOptions) {
+    this.callId = options.callId;
+    this.isCaller = options.isCaller;
+    this.isVideo = options.isVideo;
+    this.localStream = options.localStream;
+    this.onRemoteStream = options.onRemoteStream;
+    this.onCallEnded = options.onCallEnded;
+    this.onLog = options.onLog;
+    this.onCandidateCountsChange = options.onCandidateCountsChange;
+
+    this.log('info', 'CONFIG', 'Initializing RTCPeerConnection with 4 STUN servers & optional TURN fallback (iceCandidatePoolSize: 10)...');
+    try {
+      this.pc = new RTCPeerConnection(RTC_CONFIGURATION);
+    } catch (err: any) {
+      this.log('warn', 'CONFIG-FALLBACK', `Failed to init with TURN config (${err?.message}). Falling back to STUN only.`);
+      this.pc = new RTCPeerConnection(STUN_ONLY_CONFIGURATION);
+    }
+
+    this.setupPeerConnectionEvents();
+    
+    // Requirement 4: Ensure localStream tracks are added before createOffer
+    this.attachLocalTracks();
+  }
+
+  private formatTime(): string {
+    const now = new Date();
+    const h = now.getHours().toString().padStart(2, '0');
+    const m = now.getMinutes().toString().padStart(2, '0');
+    const s = now.getSeconds().toString().padStart(2, '0');
+    const ms = now.getMilliseconds().toString().padStart(3, '0');
+    return `${h}:${m}:${s}.${ms}`;
+  }
+
+  public log(type: WebRTCLogEntry['type'], tag: string, message: string) {
+    const entry: WebRTCLogEntry = {
+      id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      timestamp: this.formatTime(),
+      type,
+      tag,
+      message,
+    };
+    
+    const consoleMsg = `[WebRTC ${tag}] ${message}`;
+    if (type === 'error') {
+      console.error(consoleMsg);
+    } else if (type === 'warn') {
+      console.warn(consoleMsg);
+    } else {
+      console.log(consoleMsg);
+    }
+
+    try {
+      this.onLog(entry);
+    } catch {}
+  }
+
+  public getCandidateCounts(): CandidateCounts {
+    return { ...this.candidateCounts };
+  }
+
+  private setupPeerConnectionEvents() {
+    // 1. Signaling State Change Logging
+    this.pc.onsignalingstatechange = () => {
+      const state = this.pc.signalingState;
+      console.log('[WebRTC Signaling State]', state);
+      this.log('signaling', 'SIGNALING', `Signaling state changed to: ${state}`);
+      this.handleStateTransitions();
+    };
+
+    // 2. ICE Connection State Change
+    this.pc.oniceconnectionstatechange = () => {
+      const state = this.pc.iceConnectionState;
+      console.log('[WebRTC ICE Connection State]', state);
+      this.log('ice', 'ICE-STATE', `ICE connection state changed to: ${state}`);
+      this.handleStateTransitions();
+    };
+
+    // 3. Connection State Change
+    this.pc.onconnectionstatechange = () => {
+      const state = this.pc.connectionState;
+      console.log('[WebRTC Connection State]', state);
+      this.log('conn', 'CONN-STATE', `Peer connection state changed to: ${state}`);
+      this.handleStateTransitions();
+    };
+
+    // 4. ICE Candidate Errors & Fail-Soft Optional TURN Handling (Requirement 2)
+    this.pc.onicecandidateerror = (event: any) => {
+      const errorCode = event.errorCode;
+      const errorText = event.errorText || '';
+      const url = event.url || 'direct/unknown';
+      const address = event.address;
+      const port = event.port;
+
+      const isTurn = url.toLowerCase().includes('turn:') || url.toLowerCase().includes('metered') || url.toLowerCase().includes('openrelay');
+      const is701 = errorCode === 701;
+
+      // Fail-soft logic: TURN is an optional fallback.
+      // Do NOT fail the call on TURN 701 or server unreachable errors. Log warning and continue with STUN.
+      if (is701 || isTurn) {
+        console.warn(`[WebRTC Optional TURN Warning - Error ${errorCode}]`, {
+          errorCode,
+          errorText,
+          url,
+          address,
+          port,
+        });
+        this.log(
+          'warn',
+          'TURN-OPTIONAL',
+          `TURN server warning (${errorCode}): ${errorText || 'DNS resolution or server unreachable'} for ${url}. TURN is optional; proceeding with STUN.`
+        );
+        return;
+      }
+
+      console.error('[WebRTC ICE Candidate Error]', { errorCode, errorText, url, address, port });
+      this.log(
+        'error',
+        'ICE-ERROR',
+        `Candidate error (${errorCode}): ${errorText || 'Failed to gather from ' + url}`
+      );
+    };
+
+    // 5. ICE Gathering State Change (Requirement 3: Never auto-close on gathering)
+    this.pc.onicegatheringstatechange = () => {
+      const state = this.pc.iceGatheringState;
+      console.log('[WebRTC ICE Gathering State]', state);
+      this.log('ice', 'ICE-GATHER', `ICE gathering state: ${state}`);
+    };
+
+    // 6. ICE Candidate Found (Trickle + Vanilla + Categorization) (Requirements 1, 2, 6)
+    this.pc.onicecandidate = async (event) => {
+      if (event.candidate) {
+        const c = event.candidate;
+        console.log('[WebRTC ICE Candidate]', c.candidate);
+
+        const candStr = (c.candidate || '').toLowerCase();
+        const candType = (c.type || '').toLowerCase();
+        const isSrflx = candType === 'srflx' || candStr.includes('typ srflx');
+        const isRelay = candType === 'relay' || candStr.includes('typ relay');
+        const isHost = candType === 'host' || candStr.includes('typ host') || (!isSrflx && !isRelay);
+
+        if (isSrflx) {
+          this.candidateCounts.srflx++;
+          this.hasSrflxCandidate = true;
+          this.log(
+            'success',
+            'ICE-SRFLX',
+            `STUN srflx candidate gathered: ip=${c.address || c.relatedAddress || 'srflx'} port=${c.port} proto=${c.protocol || 'udp'}`
+          );
+          // Notify any waiting srflx promise immediately
+          const listeners = [...this.onSrflxListeners];
+          this.onSrflxListeners = [];
+          listeners.forEach((fn) => fn());
+        } else if (isRelay) {
+          this.candidateCounts.relay++;
+          this.hasRelayCandidate = true;
+          this.log(
+            'success',
+            'ICE-RELAY',
+            `TURN relay candidate gathered: ip=${c.address || 'relay'} port=${c.port} proto=${c.protocol || 'udp'}`
+          );
+        } else {
+          this.candidateCounts.host++;
+          this.log(
+            'ice',
+            'ICE-HOST',
+            `Host candidate gathered: proto=${c.protocol} ip=${c.address || c.relatedAddress || 'host'} port=${c.port}`
+          );
+        }
+        this.candidateCounts.total++;
+
+        // Notify UI of candidate counts change
+        if (this.onCandidateCountsChange) {
+          try {
+            this.onCandidateCountsChange({ ...this.candidateCounts });
+          } catch {}
+        }
+        
+        // Write candidate to Firestore subcollection for real-time NAT traversal
+        try {
+          const subCol = this.isCaller ? 'caller_candidates' : 'receiver_candidates';
+          await addDoc(collection(db, 'calls', this.callId, subCol), c.toJSON());
+        } catch (e: any) {
+          console.warn('[WebRTC ICE Candidate Write Warning]', e);
+        }
+      } else {
+        console.log('[WebRTC ICE Candidate]', 'All ICE candidates gathered (end-of-candidates)');
+        this.log('info', 'ICE-GATHER-DONE', `All candidates gathered. Counts: host=${this.candidateCounts.host}, srflx=${this.candidateCounts.srflx}, relay=${this.candidateCounts.relay}`);
+        
+        // Requirement 2: If only host candidates, log explicit network warning
+        if (this.candidateCounts.host > 0 && this.candidateCounts.srflx === 0 && this.candidateCounts.relay === 0) {
+          this.log(
+            'warn',
+            'ICE-HOST-ONLY',
+            `Network Warning: Only host candidates (${this.candidateCounts.host}) gathered; no STUN srflx or TURN relay candidates found. Direct NAT traversal across external networks may fail if peers are not on the same LAN.`
+          );
+        }
+      }
+    };
+
+    // 7. Remote Media Stream Track Received (Requirement 4)
+    this.pc.ontrack = (event) => {
+      this.log('success', 'TRACK', `Remote track received: kind=${event.track.kind}, id=${event.track.id}`);
+      
+      // Requirement 4: Explicit debug log for "REMOTE-AUDIO-TRACK received"
+      if (event.track.kind === 'audio') {
+        this.log(
+          'success', 
+          'REMOTE-AUDIO-TRACK', 
+          `REMOTE-AUDIO-TRACK received: id=${event.track.id}, enabled=${event.track.enabled}, readyState=${event.track.readyState}`
+        );
+      }
+      
+      let stream = event.streams && event.streams[0];
+      if (!stream) {
+        if (!this.remoteStream) {
+          this.remoteStream = new MediaStream();
+        }
+        if (!this.remoteStream.getTracks().some((t) => t.id === event.track.id)) {
+          this.remoteStream.addTrack(event.track);
+        }
+        stream = this.remoteStream;
+      } else {
+        if (!stream.getTracks().some((t) => t.id === event.track.id)) {
+          stream.addTrack(event.track);
+        }
+        this.remoteStream = stream;
+      }
+
+      this.onRemoteStream(stream);
+    };
+  }
+
+  /**
+   * Requirement 3: Lifecycle management
+   * - Don't auto-close on 'disconnected' or 'gathering' state.
+   * - Only close on explicit End call or after 15 sec 'failed'.
+   */
+  private handleStateTransitions() {
+    if (this.destroyed) return;
+
+    const iceState = this.pc.iceConnectionState;
+    const connState = this.pc.connectionState;
+
+    // Check if reconnected or completed -> cancel any pending failed timer
+    if (iceState === 'connected' || connState === 'connected' || iceState === 'completed') {
+      if (this.failedTimer) {
+        clearTimeout(this.failedTimer);
+        this.failedTimer = null;
+        this.log('success', 'CONN-RECOVER', 'Connection restored to connected! Cancelled 15s failure timer.');
+      }
+      return;
+    }
+
+    // Handle 'disconnected' state: DO NOT auto-close. WebRTC can self-heal or switch ICE paths.
+    if (iceState === 'disconnected' || connState === 'disconnected') {
+      this.log('warn', 'DISCONNECTED', 'Connection entered disconnected state. Retrying network path (will not auto-close)...');
+      return;
+    }
+
+    // Handle 'gathering' state: DO NOT auto-close.
+    if (this.pc.iceGatheringState === 'gathering') {
+      return;
+    }
+
+    // Handle 'failed' state: Only close after 15 seconds in failed state
+    if (iceState === 'failed' || connState === 'failed') {
+      if (!this.failedTimer) {
+        this.log('warn', 'FAILED-GRACE', 'Connection entered failed state. Starting 15-second grace period before closing...');
+        this.failedTimer = setTimeout(() => {
+          if (this.destroyed) return;
+          const currentIce = this.pc.iceConnectionState;
+          const currentConn = this.pc.connectionState;
+          if (currentIce === 'failed' || currentConn === 'failed') {
+            this.log('error', 'FAILED-TIMEOUT', 'Failed state persisted for 15 seconds. Closing call now.');
+            this.onCallEnded('Call failed: WebRTC connection failure after 15s');
+          } else {
+            this.log('success', 'CONN-RECOVER', `Connection recovered from failed state to ICE=${currentIce}, Conn=${currentConn}.`);
+          }
+        }, 15000);
+      }
+      return;
+    }
+  }
+
+  /**
+   * Requirement 1: Ensure both sides add local audio track via addTrack before creating offer/answer
+   */
+  public ensureLocalAudioTrack(): boolean {
+    try {
+      if (!this.localStream) {
+        this.log('error', 'MEDIA', 'Cannot ensure local audio track: localStream is missing');
+        return false;
+      }
+
+      const audioTracks = this.localStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        this.log('warn', 'MEDIA', 'No audio track found in localStream');
+        return false;
+      }
+
+      const audioTrack = audioTracks[0];
+      // Requirement 3: Ensure mic is enabled (not muted by default)
+      if (!audioTrack.enabled) {
+        audioTrack.enabled = true;
+        this.log('info', 'MEDIA', `Enabled local audio track before offer/answer: id=${audioTrack.id}`);
+      }
+
+      const senders = this.pc.getSenders();
+      const existingAudioSender = senders.find(
+        (s) => s.track && (s.track.kind === 'audio' || s.track.id === audioTrack.id)
+      );
+
+      if (!existingAudioSender) {
+        this.pc.addTrack(audioTrack, this.localStream);
+        this.log(
+          'success',
+          'LOCAL-AUDIO-TRACK',
+          `Added local audio track via addTrack: id=${audioTrack.id}, kind=audio, enabled=${audioTrack.enabled}`
+        );
+      } else {
+        this.log(
+          'info',
+          'LOCAL-AUDIO-TRACK',
+          `Local audio track already attached to sender: id=${existingAudioSender.track?.id}, enabled=${existingAudioSender.track?.enabled}`
+        );
+      }
+
+      // Also ensure all other tracks (e.g. video if video call) are attached
+      this.localStream.getTracks().forEach((track) => {
+        if (track.kind !== 'audio') {
+          const hasSender = senders.some((s) => s.track && s.track.id === track.id);
+          if (!hasSender) {
+            this.pc.addTrack(track, this.localStream);
+            this.log('info', 'MEDIA', `Added local track: ${track.kind} (id=${track.id})`);
+          }
+        }
+      });
+
+      return true;
+    } catch (err: any) {
+      this.log('error', 'MEDIA', `Failed to ensure local audio track: ${err?.message}`);
+      return false;
+    }
+  }
+
+  private attachLocalTracks() {
+    this.ensureLocalAudioTrack();
+  }
+
+  /**
+   * Requirement 2 & 5:
+   * Wait up to 5 seconds for srflx candidate before sending offer (or answer).
+   * - If an srflx candidate is received, resolves immediately.
+   * - If ICE gathering completes or 5s timeout elapses with no srflx found:
+   *   logs a clear warning, but DOES NOT close the PeerConnection or run cleanup,
+   *   proceeding with available host candidates and optional TURN relay candidates.
+   */
+  private async waitForSrflxOrTimeout(timeoutMs = 5000): Promise<void> {
+    if (this.hasSrflxCandidate) {
+      this.log('success', 'ICE-SRFLX', 'STUN srflx candidate already gathered. Proceeding immediately.');
+      return;
+    }
+
+    if (this.pc.iceGatheringState === 'complete') {
+      this.log(
+        'warn',
+        'ICE-NO-SRFLX',
+        'ICE gathering already complete with no srflx candidates found from STUN servers. Proceeding with host & TURN relay (PeerConnection kept open).'
+      );
+      if (this.candidateCounts.host > 0 && this.candidateCounts.srflx === 0 && this.candidateCounts.relay === 0) {
+        this.log('warn', 'ICE-HOST-ONLY', `Network Warning: Only host candidates gathered (${this.candidateCounts.host}).`);
+      }
+      return;
+    }
+
+    this.log('info', 'ICE-WAIT', `Waiting up to ${timeoutMs / 1000}s for STUN srflx candidate before sending SDP...`);
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      let timer: any = null;
+
+      const finish = (reason: 'srflx-found' | 'ice-complete' | 'timeout') => {
+        if (resolved) return;
+        resolved = true;
+        if (timer) clearTimeout(timer);
+        this.pc.removeEventListener('icegatheringstatechange', checkGathering);
+        this.onSrflxListeners = this.onSrflxListeners.filter((l) => l !== onSrflx);
+
+        if (reason === 'srflx-found') {
+          this.log('success', 'ICE-SRFLX', 'STUN srflx candidate received! Proceeding with SDP transmission.');
+        } else if (reason === 'ice-complete') {
+          this.log(
+            'warn',
+            'ICE-NO-SRFLX',
+            'ICE gathering complete: no srflx candidate produced by STUN servers. Proceeding with host & TURN relay (PeerConnection kept open).'
+          );
+        } else {
+          this.log(
+            'warn',
+            'ICE-NO-SRFLX',
+            `Timeout (${timeoutMs / 1000}s) reached: no srflx candidate found from STUN servers. Proceeding with host & TURN relay (PeerConnection kept open).`
+          );
+        }
+
+        if (this.candidateCounts.host > 0 && this.candidateCounts.srflx === 0 && this.candidateCounts.relay === 0) {
+          this.log('warn', 'ICE-HOST-ONLY', `Network Warning: Only host candidates discovered (${this.candidateCounts.host}).`);
+        }
+
+        resolve();
+      };
+
+      const onSrflx = () => finish('srflx-found');
+      this.onSrflxListeners.push(onSrflx);
+
+      const checkGathering = () => {
+        if (this.pc.iceGatheringState === 'complete') {
+          if (this.hasSrflxCandidate) {
+            finish('srflx-found');
+          } else {
+            finish('ice-complete');
+          }
+        }
+      };
+
+      this.pc.addEventListener('icegatheringstatechange', checkGathering);
+
+      timer = setTimeout(() => {
+        finish('timeout');
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Start Signaling Flow
+   */
+  public async start() {
+    if (this.isCaller) {
+      await this.startCallerFlow();
+    } else {
+      await this.startReceiverFlow();
+    }
+  }
+
+  /**
+   * Caller Flow (Requirements 1, 2, 4, 5):
+   * 1. Start listening for receiver candidates early (queues any early candidates)
+   * 2. Create Offer (local tracks already attached)
+   * 3. Set Local Description
+   * 4. Wait up to 5s for srflx candidate
+   * 5. Send Offer to Firestore
+   * 6. Listen for Answer in Firestore (listener kept alive until destroy)
+   */
+  private async startCallerFlow() {
+    this.log('info', 'CALLER', 'Starting caller signaling flow...');
+    try {
+      // 1. Listen for receiver candidates right away to queue them if receiver responds quickly
+      this.listenForRemoteCandidates('receiver_candidates');
+
+      // 2. Setup Firestore Answer listener right away so signaling channel is immediately active and stays alive
+      this.unsubCallDoc = onSnapshot(
+        doc(db, 'calls', this.callId),
+        async (snap) => {
+          if (!snap.exists() || this.destroyed) return;
+          const data = snap.data();
+          if (data?.answer && !this.remoteDescriptionSet && this.pc.signalingState === 'have-local-offer') {
+            this.log('signaling', 'ANSWER-RECV', 'Remote answer detected in Firestore! Setting remote description...');
+            try {
+              await this.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+              this.remoteDescriptionSet = true;
+              this.log('success', 'ANSWER-SET', 'Remote answer applied. Signaling state is now: ' + this.pc.signalingState);
+              await this.processQueuedCandidates();
+            } catch (e: any) {
+              this.log('error', 'ANSWER-ERR', `Failed to apply remote answer: ${e?.message}`);
+            }
+          }
+        },
+        (err) => {
+          this.log('error', 'SIGNALING', `Firestore call listener error: ${err?.message}`);
+        }
+      );
+
+      // 3. Ensure local audio track is attached via addTrack before creating offer (Requirement 1)
+      this.ensureLocalAudioTrack();
+
+      const offer = await this.pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: this.isVideo,
+      });
+
+      await this.pc.setLocalDescription(offer);
+      this.log('signaling', 'OFFER', 'Local description set to offer.');
+
+      // 4. Wait up to 5 seconds for srflx candidate before sending offer (log warning if none, keep connection open)
+      await this.waitForSrflxOrTimeout(5000);
+
+      const completeOffer = {
+        type: this.pc.localDescription?.type || 'offer',
+        sdp: this.pc.localDescription?.sdp || offer.sdp,
+      };
+
+      this.log('signaling', 'OFFER-SEND', `Sending offer to Firestore (SDP size: ${completeOffer.sdp?.length || 0} chars)...`);
+      await updateDoc(doc(db, 'calls', this.callId), {
+        offer: completeOffer,
+        offer_sent_at: serverTimestamp(),
+      });
+      this.log('success', 'OFFER-SENT', 'Offer stored in Firestore calls collection.');
+    } catch (err: any) {
+      this.log('error', 'CALLER-ERR', `Caller signaling failed: ${err?.message}`);
+    }
+  }
+
+  /**
+   * Receiver Flow (Requirements 1, 2, 4, 5):
+   * 1. Start listening for caller candidates early (queues any early candidates)
+   * 2. Listen for Offer from Caller
+   * 3. Set Remote Description (Offer)
+   * 4. Drain queued candidates
+   * 5. Create Answer
+   * 6. Set Local Description
+   * 7. Wait up to 5s for srflx candidate
+   * 8. Send Answer to Firestore
+   */
+  private async startReceiverFlow() {
+    this.log('info', 'RECEIVER', 'Starting receiver signaling flow, waiting for caller offer...');
+    
+    // 1. Listen for caller candidates early to queue them before remote description is set
+    this.listenForRemoteCandidates('caller_candidates');
+
+    // 2. Listen for Offer (kept alive until explicit destroy)
+    this.unsubCallDoc = onSnapshot(
+      doc(db, 'calls', this.callId),
+      async (snap) => {
+        if (!snap.exists() || this.destroyed) return;
+        const data = snap.data();
+
+        if (data?.offer && !this.remoteDescriptionSet && this.pc.signalingState === 'stable') {
+          this.log('signaling', 'OFFER-RECV', 'Caller offer found in Firestore! Applying remote description...');
+          try {
+            await this.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            this.remoteDescriptionSet = true;
+            this.log('success', 'OFFER-SET', 'Remote offer applied. Creating answer...');
+
+            // Drain any caller candidates that arrived before the offer was set
+            await this.processQueuedCandidates();
+
+            // Requirement 1: Ensure local audio track is attached via addTrack before creating answer
+            this.ensureLocalAudioTrack();
+
+            const answer = await this.pc.createAnswer();
+            await this.pc.setLocalDescription(answer);
+            this.log('signaling', 'ANSWER', 'Local description set to answer.');
+
+            // Wait up to 5 seconds for srflx candidate before sending answer (log warning if none, keep connection open)
+            await this.waitForSrflxOrTimeout(5000);
+
+            const completeAnswer = {
+              type: this.pc.localDescription?.type || 'answer',
+              sdp: this.pc.localDescription?.sdp || answer.sdp,
+            };
+
+            this.log('signaling', 'ANSWER-SEND', `Sending answer to Firestore (SDP size: ${completeAnswer.sdp?.length || 0} chars)...`);
+            await updateDoc(doc(db, 'calls', this.callId), {
+              answer: completeAnswer,
+              answer_sent_at: serverTimestamp(),
+            });
+            this.log('success', 'ANSWER-SENT', 'Answer stored in Firestore calls collection.');
+          } catch (e: any) {
+            this.log('error', 'RECEIVER-ERR', `Receiver negotiation failed: ${e?.message}`);
+          }
+        }
+      },
+      (err) => {
+        this.log('error', 'SIGNALING', `Firestore receiver listener error: ${err?.message}`);
+      }
+    );
+  }
+
+  /**
+   * Listen for Remote Candidates from Firestore (Requirement 1)
+   * Ensures listeners are not removed early and candidates added before remote description set are queued.
+   */
+  private listenForRemoteCandidates(subCol: string) {
+    this.unsubCandidates = onSnapshot(
+      collection(db, 'calls', this.callId, subCol),
+      (snapshot) => {
+        if (this.destroyed) return;
+        snapshot.docChanges().forEach(async (change) => {
+          if (change.type === 'added') {
+            const candidateInit = change.doc.data() as RTCIceCandidateInit;
+            if (!candidateInit || !candidateInit.candidate) {
+              return;
+            }
+
+            if (this.remoteDescriptionSet && this.pc.remoteDescription) {
+              await this.applyCandidate(candidateInit);
+            } else {
+              this.remoteCandidatesQueue.push(candidateInit);
+              this.log('ice', 'CAND-QUEUE', `Queued remote candidate before remote description (${(candidateInit as any).protocol || 'candidate'})`);
+            }
+          }
+        });
+      },
+      (err) => {
+        this.log('error', 'CAND-ERR', `Firestore candidate listener error: ${err?.message}`);
+      }
+    );
+  }
+
+  /**
+   * Process and drain all candidates queued before remote description was set
+   */
+  private async processQueuedCandidates() {
+    if (!this.remoteDescriptionSet || !this.pc.remoteDescription) return;
+    if (this.remoteCandidatesQueue.length === 0) return;
+
+    this.log('info', 'CAND-DRAIN', `Draining ${this.remoteCandidatesQueue.length} queued remote candidates...`);
+    const queue = [...this.remoteCandidatesQueue];
+    this.remoteCandidatesQueue = [];
+
+    for (const candidateInit of queue) {
+      await this.applyCandidate(candidateInit);
+    }
+  }
+
+  /**
+   * Apply a single candidate with deduplication and error handling
+   */
+  private async applyCandidate(candidateInit: RTCIceCandidateInit) {
+    if (!candidateInit || !candidateInit.candidate) return;
+
+    const candKey = `${candidateInit.sdpMid}_${candidateInit.sdpMLineIndex}_${candidateInit.candidate}`;
+    if (this.appliedCandidateKeys.has(candKey)) {
+      return;
+    }
+    this.appliedCandidateKeys.add(candKey);
+
+    try {
+      await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
+      this.log('ice', 'CAND-ADD', `Applied remote candidate: ${(candidateInit as any).protocol || 'candidate'} (${candidateInit.candidate.slice(0, 25)}...)`);
+    } catch (err: any) {
+      this.log('error', 'CAND-ERR', `Failed to add ICE candidate: ${err?.message}`);
+    }
+  }
+
+  /**
+   * Requirement 5: Cleanup should ONLY run on user End (or 15s failed timeout),
+   * NOT on ICE gathering timeout.
+   */
+  public destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.onSrflxListeners = [];
+    
+    if (this.failedTimer) {
+      clearTimeout(this.failedTimer);
+      this.failedTimer = null;
+    }
+    if (this.unsubCallDoc) {
+      this.unsubCallDoc();
+      this.unsubCallDoc = null;
+    }
+    if (this.unsubCandidates) {
+      this.unsubCandidates();
+      this.unsubCandidates = null;
+    }
+    try {
+      this.pc.close();
+      this.log('info', 'CLEANUP', 'PeerConnection closed and session cleaned up on explicit call termination.');
+    } catch {}
+  }
+}
+
+
+################################################################################
+FILE 2: src/components/CallScreen.tsx
+################################################################################
+
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { 
+  PhoneOff, 
+  Mic, 
+  MicOff, 
+  Video, 
+  VideoOff, 
+  Coins, 
+  Sparkles, 
+  Monitor, 
+  MonitorOff, 
+  Volume2, 
+  Crown, 
+  MessageSquare, 
+  Send, 
+  X, 
+  VolumeX, 
+  Radio,
+  Terminal,
+  Wifi,
+  Activity,
+  AlertTriangle,
+  Heart
+} from 'lucide-react';
+import { useCall } from '../context/CallContext';
+import { useAuth } from '../context/AuthContext';
+import { WebRTCSession, WebRTCLogEntry, CandidateCounts } from '../services/webrtcService';
+import { DebugConsole } from './DebugConsole';
+import { 
+  collection, 
+  addDoc, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  serverTimestamp 
+} from 'firebase/firestore';
+import { db } from '../firebase/config';
+
+export interface CallChatMessage {
+  id?: string;
+  senderId: string;
+  sender_id?: string;
+  senderName?: string;
+  sender_name?: string;
+  senderRole?: string;
+  sender_role?: string;
+  text: string;
+  message?: string;
+  timestamp?: any;
+  created_at?: string;
+}
+
+export interface FloatingHeartItem {
+  id: string;
+  leftOffset: number;
+  size: number;
+  color: string;
+  duration: number;
+  swayX1: number;
+  swayX2: number;
+  swayX3: number;
+  swayX4: number;
+  swayX5: number;
+  rot1: number;
+  rot2: number;
+  rot3: number;
+  rot4: number;
+  rot5: number;
+  emoji?: string;
+}
+
+export const CallScreen: React.FC = () => {
+  const { activeCall, callDuration, endCall, ownerEndCall, ownerMuteCall } = useCall();
+  const { currentUser } = useAuth();
+
+  // Audio / Video Controls State
+  const [isMuted, setIsMuted] = useState(false);
+  const isMutedRef = useRef(isMuted);
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
+  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
+
+  // WebRTC Live Connection & Diagnostics State
+  const [logs, setLogs] = useState<WebRTCLogEntry[]>([]);
+  const [signalingState, setSignalingState] = useState<string>('stable');
+  const [iceState, setIceState] = useState<string>('new');
+  const [connectionState, setConnectionState] = useState<string>('new');
+  const [iceGatheringState, setIceGatheringState] = useState<string>('new');
+  const [candidateCounts, setCandidateCounts] = useState<CandidateCounts>({ host: 0, srflx: 0, relay: 0, total: 0 });
+  const [showDebugConsole, setShowDebugConsole] = useState(true);
+  // Requirement 1: Set debug console default state to collapsed to badge on call start
+  const [isDebugCollapsed, setIsDebugCollapsed] = useState(true);
+  const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
+
+  // Requirement 2: Auto-collapse console when ICE state becomes "connected"
+  useEffect(() => {
+    if (iceState === 'connected' || iceState === 'completed') {
+      setIsDebugCollapsed(true);
+    }
+  }, [iceState]);
+
+  // DOM References
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Media & Session References
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const webrtcSessionRef = useRef<WebRTCSession | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animFrameRef = useRef<number | null>(null);
+
+  // In-Meeting Realtime Chat (Firestore calls/{callId}/messages)
+  const [showChat, setShowChat] = useState(false);
+  const [chatMessages, setChatMessages] = useState<CallChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
+
+  const isOwner = currentUser?.role === 'owner' || currentUser?.role === 'admin' || localStorage.getItem('meetup_owner_authenticated') === 'true';
+  const isCaller = activeCall?.caller_id === currentUser?.uid;
+  const partnerName = isCaller ? activeCall?.receiver_name : activeCall?.caller_name;
+  const partnerPic = isCaller ? activeCall?.receiver_pic : activeCall?.caller_pic;
+  const isVideoCall = activeCall?.type === 'video' || activeCall?.call_type === 'video';
+
+  // Format seconds into MM:SS
+  const formatTime = (secs: number) => {
+    const mins = Math.floor(secs / 60);
+    const remainder = secs % 60;
+    return `${mins.toString().padStart(2, '0')}:${remainder.toString().padStart(2, '0')}`;
+  };
+
+  // Remaining minutes estimation based on caller's coins
+  const remainingMinutes = currentUser
+    ? Math.max(0, Math.floor((currentUser.coins_balance || 0) / (activeCall?.rate_per_min || 20)))
+    : 0;
+
+  // Flash temporary HUD status alert
+  const showNotice = useCallback((msg: string) => {
+    setStatusNotice(msg);
+    const timer = setTimeout(() => {
+      setStatusNotice((current) => (current === msg ? null : current));
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Floating Heart Animation State & Helpers
+  const [floatingHearts, setFloatingHearts] = useState<FloatingHeartItem[]>([]);
+  const [isHeartPopping, setIsHeartPopping] = useState(false);
+  const [heartCount, setHeartCount] = useState(0);
+  const heartCounterTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const HEART_COLORS = [
+    '#FF69B4', // Hot pink
+    '#FF1493', // Deep pink
+    '#FF4081', // Pink A200
+    '#F43F5E', // Rose 500
+    '#FB7185', // Rose 400
+    '#E11D48', // Rose 600
+    '#FDA4AF', // Rose 300
+    '#FF6584', // Vibrant coral pink
+    '#A855F7', // Radiant violet
+  ];
+
+  const HEART_EMOJIS = ['💖', '❤️', '💕', '💗', '💓', '✨', '💝'];
+
+  const spawnHearts = useCallback((count = 1) => {
+    const newItems: FloatingHeartItem[] = [];
+
+    for (let i = 0; i < count; i++) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const color = HEART_COLORS[Math.floor(Math.random() * HEART_COLORS.length)];
+      const size = Math.floor(Math.random() * 18) + 26; // 26px to 44px
+      const duration = 1.9 + Math.random() * 0.7; // 1.9s to 2.6s
+      const leftOffset = (Math.random() - 0.5) * 55; // -27px to +27px around anchor
+
+      const swayDirection = Math.random() > 0.5 ? 1 : -1;
+      const swayMag = 14 + Math.random() * 22;
+      const swayX1 = swayDirection * (swayMag * 0.4);
+      const swayX2 = -swayDirection * (swayMag * 0.8);
+      const swayX3 = swayDirection * (swayMag * 1.1);
+      const swayX4 = -swayDirection * (swayMag * 0.6);
+      const swayX5 = swayDirection * (swayMag * 0.3);
+
+      const rot1 = (Math.random() - 0.5) * 28;
+      const rot2 = (Math.random() - 0.5) * 36;
+      const rot3 = (Math.random() - 0.5) * 30;
+      const rot4 = (Math.random() - 0.5) * 26;
+      const rot5 = (Math.random() - 0.5) * 18;
+
+      const useEmoji = Math.random() < 0.3 ? HEART_EMOJIS[Math.floor(Math.random() * HEART_EMOJIS.length)] : undefined;
+
+      newItems.push({
+        id,
+        leftOffset,
+        size,
+        color,
+        duration,
+        swayX1,
+        swayX2,
+        swayX3,
+        swayX4,
+        swayX5,
+        rot1,
+        rot2,
+        rot3,
+        rot4,
+        rot5,
+        emoji: useEmoji,
+      });
+
+      // Cleanup heart after animation duration
+      setTimeout(() => {
+        setFloatingHearts((prev) => prev.filter((h) => h.id !== id));
+      }, duration * 1000 + 100);
+    }
+
+    setFloatingHearts((prev) => [...prev.slice(-35), ...newItems]);
+  }, []);
+
+  const handleSendHeart = useCallback(() => {
+    // 1. Pop button animation
+    setIsHeartPopping(true);
+    setTimeout(() => setIsHeartPopping(false), 350);
+
+    // 2. Increment combo counter
+    setHeartCount((c) => c + 1);
+    if (heartCounterTimerRef.current) {
+      clearTimeout(heartCounterTimerRef.current);
+    }
+    heartCounterTimerRef.current = setTimeout(() => {
+      setHeartCount(0);
+    }, 1500);
+
+    // 3. Immediately spawn local floating hearts
+    const burst = Math.floor(Math.random() * 2) + 1;
+    spawnHearts(burst);
+
+    // 4. Synchronize reaction to Firestore calls/{callId}/reactions
+    if (activeCall?.id && currentUser?.uid) {
+      addDoc(collection(db, 'calls', activeCall.id, 'reactions'), {
+        type: 'heart',
+        senderId: currentUser.uid,
+        timestamp: serverTimestamp(),
+      }).catch(() => {});
+    }
+  }, [activeCall?.id, currentUser?.uid, spawnHearts]);
+
+  // Stable references across component re-renders
+  const initializedCallIdRef = useRef<string | null>(null);
+  const endCallRef = useRef(endCall);
+  endCallRef.current = endCall;
+  const ownerEndCallRef = useRef(ownerEndCall);
+  ownerEndCallRef.current = ownerEndCall;
+  const showNoticeRef = useRef(showNotice);
+  showNoticeRef.current = showNotice;
+  const isCallerRef = useRef(isCaller);
+  isCallerRef.current = isCaller;
+  const isVideoCallRef = useRef(isVideoCall);
+  isVideoCallRef.current = isVideoCall;
+
+  // Voice Activity Detection (AnalyserNode) to detect speaking in real-time
+  const setupAudioMonitoring = useCallback((stream: MediaStream) => {
+    try {
+      const audioTrack = stream.getAudioTracks()[0];
+      if (!audioTrack) return;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      const audioCtx = new AudioCtx();
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.5;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      audioContextRef.current = audioCtx;
+      analyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      const checkVolume = () => {
+        if (!analyserRef.current || isMutedRef.current) {
+          setIsSpeaking(false);
+          animFrameRef.current = requestAnimationFrame(checkVolume);
+          return;
+        }
+
+        analyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+
+        // If average volume is above threshold, indicate speaking
+        setIsSpeaking(average > 12);
+        animFrameRef.current = requestAnimationFrame(checkVolume);
+      };
+
+      checkVolume();
+    } catch (err) {
+      console.warn('Audio monitoring setup warning:', err);
+    }
+  }, []);
+
+  // Track event listeners to reflect external changes
+  const bindTrackListeners = useCallback((stream: MediaStream) => {
+    const audioTrack = stream.getAudioTracks()[0];
+    if (audioTrack) {
+      // Keep track active; do not set isMuted on hardware startup transient mute events
+      audioTrack.onended = () => {
+        console.warn('[WebRTC Local Audio Track Ended]');
+      };
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.onended = () => {
+        console.warn('[WebRTC Local Video Track Ended]');
+      };
+    }
+  }, []);
+
+  // -------------------------------------------------------------
+  // WebRTC INITIALIZATION & SIGNALING
+  // -------------------------------------------------------------
+  useEffect(() => {
+    const callId = activeCall?.id;
+    if (!callId) return;
+
+    // Prevent re-initialization and auto-cleanup on re-renders for the same call
+    if (initializedCallIdRef.current === callId) {
+      return;
+    }
+    initializedCallIdRef.current = callId;
+
+    let isSubscribed = true;
+
+    const initWebRTC = async () => {
+      try {
+        const callerMode = isCallerRef.current;
+        const videoMode = isVideoCallRef.current;
+
+        // Requirement 3: Ensure getUserMedia audio:true is requested and mic is not muted by default
+        let stream: MediaStream;
+        const audioConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints,
+            video: videoMode ? {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: 'user',
+            } : false,
+          });
+        } catch (mediaErr: any) {
+          console.warn('[getUserMedia advanced audio failed, falling back to audio: true]:', mediaErr);
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: videoMode ? true : false,
+          });
+        }
+
+        if (!isSubscribed) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        // Requirement 3: Ensure all local audio tracks are active and enabled by default
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          audioTracks.forEach((t) => {
+            t.enabled = true;
+            console.log('[WebRTC Local Audio Track Initialized - Mic Active]', {
+              id: t.id,
+              enabled: t.enabled,
+              muted: t.muted,
+              readyState: t.readyState,
+            });
+          });
+        } else {
+          console.warn('[WebRTC Warning]: No audio track returned by getUserMedia!');
+        }
+        setIsMuted(false);
+
+        localStreamRef.current = stream;
+
+        // Attach local preview
+        if (localVideoRef.current && videoMode) {
+          localVideoRef.current.srcObject = stream;
+        }
+
+        bindTrackListeners(stream);
+        setupAudioMonitoring(stream);
+
+        // 2. Instantiate WebRTCSession with 4 STUN + optional TURN fallback + 15s failure grace
+        const session = new WebRTCSession({
+          callId,
+          isCaller: callerMode,
+          isVideo: videoMode,
+          localStream: stream,
+          onCandidateCountsChange: (counts) => {
+            setCandidateCounts(counts);
+          },
+          onRemoteStream: (remoteStream) => {
+            console.log('[WebRTC Remote Stream Attached]', remoteStream);
+            remoteStreamRef.current = remoteStream;
+
+            // Requirement 4: Confirm and log "REMOTE-AUDIO-TRACK received"
+            const remoteAudioTracks = remoteStream.getAudioTracks();
+            if (remoteAudioTracks.length > 0) {
+              const audioTrack = remoteAudioTracks[0];
+              console.log('[WebRTC REMOTE-AUDIO-TRACK received]', {
+                id: audioTrack.id,
+                enabled: audioTrack.enabled,
+                readyState: audioTrack.readyState,
+              });
+              setLogs((prev) => [
+                ...prev,
+                {
+                  id: `remote_audio_${Date.now()}`,
+                  timestamp: new Date().toLocaleTimeString(),
+                  type: 'success',
+                  tag: 'REMOTE-AUDIO-TRACK',
+                  message: `REMOTE-AUDIO-TRACK received: id=${audioTrack.id}, enabled=${audioTrack.enabled}`,
+                },
+              ]);
+            }
+
+            // Attach to remote video if video call (muted to prevent duplicate audio conflict)
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.srcObject = remoteStream;
+              remoteVideoRef.current.play().catch((e) => console.log('Remote video auto-play:', e));
+            }
+
+            // Requirement 2: Attach remote stream to audio element and call play() with user gesture fallback
+            if (remoteAudioRef.current) {
+              const audioEl = remoteAudioRef.current;
+              audioEl.srcObject = remoteStream;
+              audioEl.muted = false;
+              audioEl.volume = 1.0;
+
+              const playPromise = audioEl.play();
+              if (playPromise !== undefined) {
+                playPromise
+                  .then(() => {
+                    console.log('[WebRTC Remote Audio Playing Successfully]');
+                  })
+                  .catch((err) => {
+                    console.warn('[WebRTC Remote Audio Autoplay Blocked - waiting for user gesture fallback]:', err);
+                    
+                    const handleGesture = () => {
+                      if (audioEl) {
+                        audioEl.play()
+                          .then(() => console.log('[WebRTC Remote Audio Resumed via user gesture]'))
+                          .catch((e) => console.warn('[WebRTC Remote Audio Fallback Error]:', e));
+                      }
+                      window.removeEventListener('click', handleGesture);
+                      window.removeEventListener('touchstart', handleGesture);
+                      window.removeEventListener('keydown', handleGesture);
+                    };
+
+                    window.addEventListener('click', handleGesture, { once: true });
+                    window.addEventListener('touchstart', handleGesture, { once: true });
+                    window.addEventListener('keydown', handleGesture, { once: true });
+                  });
+              }
+            }
+
+            const hasVideoTracks = remoteStream.getVideoTracks().length > 0;
+            setHasRemoteVideo(hasVideoTracks);
+          },
+          onCallEnded: (reason) => {
+            console.warn('[WebRTC Call Ended Callback]', reason);
+            showNoticeRef.current(reason);
+            // End call via CallContext
+            endCallRef.current();
+          },
+          onLog: (entry) => {
+            // Keep at most 200 logs for memory performance
+            setLogs((prev) => {
+              const updated = [...prev, entry];
+              return updated.length > 200 ? updated.slice(updated.length - 200) : updated;
+            });
+
+            // Sync matrix states
+            if (session.pc) {
+              setSignalingState(session.pc.signalingState);
+              setIceState(session.pc.iceConnectionState);
+              setConnectionState(session.pc.connectionState);
+              setIceGatheringState(session.pc.iceGatheringState);
+            }
+          },
+        });
+
+        webrtcSessionRef.current = session;
+        await session.start();
+      } catch (err: any) {
+        console.error('Failed to initialize WebRTC call:', err);
+        const errMsg = err?.message || 'Camera/Microphone permission denied';
+        showNoticeRef.current(errMsg);
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: `err_${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'error',
+            tag: 'INIT-ERROR',
+            message: errMsg,
+          },
+        ]);
+      }
+    };
+
+    initWebRTC();
+
+    return () => {
+      // ONLY cleanup on actual component unmount of call screen or call change
+      isSubscribed = false;
+      initializedCallIdRef.current = null;
+      if (webrtcSessionRef.current) {
+        webrtcSessionRef.current.destroy();
+        webrtcSessionRef.current = null;
+      }
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => track.stop());
+        localStreamRef.current = null;
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((track) => track.stop());
+        screenStreamRef.current = null;
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
+      }
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+    };
+  }, [activeCall?.id]);
+
+  // Explicit End Call Handler (Requirement 2: Only call cleanup on explicit End button press or component unmount)
+  const handleExplicitEndCall = useCallback(async () => {
+    if (webrtcSessionRef.current) {
+      webrtcSessionRef.current.destroy();
+      webrtcSessionRef.current = null;
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
+    }
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((track) => track.stop());
+      screenStreamRef.current = null;
+    }
+    if (isOwner && activeCall?.id) {
+      await ownerEndCallRef.current(activeCall.id);
+    } else {
+      await endCallRef.current();
+    }
+  }, [isOwner, activeCall?.id]);
+
+  // Real-time Mute / Unmute handler
+  const handleToggleMic = useCallback(() => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach((track) => {
+        track.enabled = !nextMuted;
+      });
+    }
+
+    if (webrtcSessionRef.current) {
+      webrtcSessionRef.current.log(
+        'info',
+        'MEDIA',
+        nextMuted ? 'Local microphone muted' : 'Local microphone unmuted'
+      );
+    }
+
+    showNotice(nextMuted ? 'Microphone Muted' : 'Microphone Active');
+  }, [isMuted, showNotice]);
+
+  // Real-time Camera Toggle handler
+  const handleToggleCamera = useCallback(async () => {
+    const nextVideoOff = !isVideoOff;
+    setIsVideoOff(nextVideoOff);
+
+    if (localStreamRef.current) {
+      const videoTracks = localStreamRef.current.getVideoTracks();
+      if (videoTracks.length > 0) {
+        videoTracks.forEach((track) => {
+          track.enabled = !nextVideoOff;
+        });
+      } else if (!nextVideoOff) {
+        try {
+          const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          const camTrack = camStream.getVideoTracks()[0];
+          localStreamRef.current.addTrack(camTrack);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = localStreamRef.current;
+          }
+          if (webrtcSessionRef.current?.pc) {
+            webrtcSessionRef.current.pc.addTrack(camTrack, localStreamRef.current);
+          }
+        } catch (err) {
+          console.warn('Could not activate camera track:', err);
+        }
+      }
+    }
+
+    if (webrtcSessionRef.current) {
+      webrtcSessionRef.current.log(
+        'info',
+        'MEDIA',
+        nextVideoOff ? 'Camera turned off' : 'Camera turned on'
+      );
+    }
+
+    showNotice(nextVideoOff ? 'Camera Turned Off' : 'Camera Active');
+  }, [isVideoOff, showNotice]);
+
+  // Toggle Screen Sharing
+  const handleToggleScreenShare = async () => {
+    if (isScreenSharing) {
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
+        screenStreamRef.current = null;
+      }
+      setIsScreenSharing(false);
+      showNotice('Screen Sharing Stopped');
+    } else {
+      try {
+        if (!navigator.mediaDevices?.getDisplayMedia) {
+          showNotice('Screen sharing is not supported on this device');
+          return;
+        }
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        });
+        screenStreamRef.current = stream;
+        if (screenVideoRef.current) {
+          screenVideoRef.current.srcObject = stream;
+        }
+        setIsScreenSharing(true);
+        showNotice('Screen Sharing Active');
+
+        stream.getVideoTracks()[0].onended = () => {
+          setIsScreenSharing(false);
+          screenStreamRef.current = null;
+          showNotice('Screen Sharing Stopped');
+        };
+      } catch (err: any) {
+        console.warn('Screen share cancelled or failed:', err);
+      }
+    }
+  };
+
+  // Requirement 1, 2, 4: Subscribe to in-call chat messages in Firestore under calls/{callId}/messages
+  useEffect(() => {
+    const callId = activeCall?.id;
+    if (!callId) return;
+
+    const messagesCol = collection(db, 'calls', callId, 'messages');
+    const messagesQuery = query(messagesCol, orderBy('timestamp', 'asc'));
+
+    const unsubscribe = onSnapshot(
+      messagesQuery,
+      (snapshot) => {
+        const remoteMsgs: CallChatMessage[] = [];
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data();
+          remoteMsgs.push({
+            id: docSnap.id,
+            senderId: d.senderId || d.sender_id || '',
+            sender_id: d.sender_id || d.senderId || '',
+            senderName: d.senderName || d.sender_name || 'Anonymous',
+            sender_name: d.sender_name || d.senderName || 'Anonymous',
+            senderRole: d.senderRole || d.sender_role || 'user',
+            sender_role: d.sender_role || d.senderRole || 'user',
+            text: d.text || d.message || '',
+            message: d.message || d.text || '',
+            timestamp: d.timestamp,
+            created_at: d.created_at || (d.timestamp?.toDate ? d.timestamp.toDate().toISOString() : new Date().toISOString()),
+          });
+        });
+
+        // Requirement 3: Merge local + remote from Firestore
+        setChatMessages((prevLocal) => {
+          const pendingLocal = prevLocal.filter(
+            (local) => local.id?.startsWith('local_') && !remoteMsgs.some((r) => (r.senderId === local.senderId || r.sender_id === local.senderId) && (r.text === local.text || r.message === local.text))
+          );
+          return [...remoteMsgs, ...pendingLocal];
+        });
+
+        setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+      },
+      (err) => {
+        console.warn('[Firestore Chat Listener query failed, using unordered fallback]:', err);
+        const fallbackUnsub = onSnapshot(messagesCol, (fallbackSnap) => {
+          const fallbackMsgs: CallChatMessage[] = [];
+          fallbackSnap.forEach((docSnap) => {
+            const d = docSnap.data();
+            fallbackMsgs.push({
+              id: docSnap.id,
+              senderId: d.senderId || d.sender_id || '',
+              sender_id: d.sender_id || d.senderId || '',
+              senderName: d.senderName || d.sender_name || 'Anonymous',
+              sender_name: d.sender_name || d.senderName || 'Anonymous',
+              senderRole: d.senderRole || d.sender_role || 'user',
+              sender_role: d.sender_role || d.senderRole || 'user',
+              text: d.text || d.message || '',
+              message: d.message || d.text || '',
+              timestamp: d.timestamp,
+              created_at: d.created_at || (d.timestamp?.toDate ? d.timestamp.toDate().toISOString() : new Date().toISOString()),
+            });
+          });
+          fallbackMsgs.sort((a, b) => {
+            const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return timeA - timeB;
+          });
+
+          setChatMessages((prevLocal) => {
+            const pendingLocal = prevLocal.filter(
+              (local) => local.id?.startsWith('local_') && !fallbackMsgs.some((r) => (r.senderId === local.senderId || r.sender_id === local.senderId) && (r.text === local.text || r.message === local.text))
+            );
+            return [...fallbackMsgs, ...pendingLocal];
+          });
+          setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+        });
+        return () => fallbackUnsub();
+      }
+    );
+
+    return () => unsubscribe();
+  }, [activeCall?.id]);
+
+  // Listen for real-time remote peer heart reactions on calls/{callId}/reactions
+  useEffect(() => {
+    if (!activeCall?.id) return;
+    const reactionsRef = collection(db, 'calls', activeCall.id, 'reactions');
+    const q = query(reactionsRef, orderBy('timestamp', 'asc'));
+    const mountTime = Date.now();
+
+    const unsub = onSnapshot(
+      q,
+      (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            // Spawn if triggered by remote peer
+            if (data.senderId && data.senderId !== currentUser?.uid) {
+              const reactionTime = data.timestamp?.toMillis ? data.timestamp.toMillis() : Date.now();
+              if (reactionTime >= mountTime - 3000) {
+                spawnHearts(Math.floor(Math.random() * 2) + 1);
+              }
+            }
+          }
+        });
+      },
+      (err) => {
+        console.warn('[CallScreen] Reactions listener note:', err);
+      }
+    );
+
+    return () => unsub();
+  }, [activeCall?.id, currentUser?.uid, spawnHearts]);
+
+  // Requirement 1 & 3 & 4: Store chat messages in Firestore under calls/{callId}/messages with timestamp, senderId, text
+  const handleSendChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = chatInput.trim();
+    const callId = activeCall?.id;
+    if (!text || !callId || !currentUser) return;
+
+    const localId = `local_${Date.now()}`;
+    const newMsg: CallChatMessage = {
+      id: localId,
+      senderId: currentUser.uid,
+      sender_id: currentUser.uid,
+      senderName: isOwner ? `👑 Owner (${currentUser.name})` : currentUser.name,
+      sender_name: isOwner ? `👑 Owner (${currentUser.name})` : currentUser.name,
+      senderRole: currentUser.role || (isOwner ? 'owner' : 'user'),
+      sender_role: currentUser.role || (isOwner ? 'owner' : 'user'),
+      text,
+      message: text,
+      timestamp: serverTimestamp(),
+      created_at: new Date().toISOString(),
+    };
+
+    // Requirement 3: Merge local state optimistically
+    setChatMessages((prev) => [...prev, newMsg]);
+    setChatInput('');
+    setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+
+    try {
+      await addDoc(collection(db, 'calls', callId, 'messages'), {
+        callId,
+        senderId: currentUser.uid,
+        sender_id: currentUser.uid,
+        senderName: newMsg.senderName,
+        sender_name: newMsg.sender_name,
+        senderRole: newMsg.senderRole,
+        sender_role: newMsg.sender_role,
+        text,
+        message: text,
+        timestamp: serverTimestamp(),
+        created_at: newMsg.created_at,
+      });
+    } catch (err: any) {
+      console.error('[WebRTC Chat Send Error]:', err);
+    }
+  };
+
+  if (!activeCall) return null;
+
+  const isConnected = iceState === 'connected' || iceState === 'completed' || connectionState === 'connected';
+  const isDisconnected = iceState === 'disconnected' || connectionState === 'disconnected';
+  const isFailed = iceState === 'failed' || connectionState === 'failed';
+
+  return (
+    <div className="fixed inset-0 z-50 bg-[#0B0B0E] flex flex-col justify-between overflow-hidden select-none">
+      {/* Hidden Audio element for remote audio stream playback */}
+      <audio ref={remoteAudioRef} autoPlay playsInline />
+
+      {/* 1. Top Heads-Up Display (HUD) */}
+      <div className="absolute top-0 left-0 right-0 z-30 px-4 py-3 bg-gradient-to-b from-black/95 via-black/80 to-transparent flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <img
+              src={partnerPic}
+              alt={partnerName}
+              className="w-10 h-10 rounded-full object-cover border-2 border-[#FF69B4] shadow-[0_0_12px_rgba(255,105,180,0.5)]"
+            />
+            {/* Live presence indicator */}
+            <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-black ${
+              isConnected ? 'bg-emerald-500 animate-pulse' : isDisconnected ? 'bg-amber-500 animate-ping' : isFailed ? 'bg-red-500' : 'bg-blue-400'
+            }`} />
+          </div>
+
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                {partnerName}
+              </h3>
+              {isOwner && (
+                <span className="px-2 py-0.5 rounded-full bg-amber-500 text-black text-[10px] font-black uppercase flex items-center gap-1 shadow-[0_0_10px_rgba(245,158,11,0.6)]">
+                  <Crown className="w-3 h-3" />
+                  <span>OWNER</span>
+                </span>
+              )}
+            </div>
+            
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-xs font-mono font-bold text-emerald-400 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                {formatTime(callDuration)}
+              </span>
+              <span className="text-[10px] text-zinc-500">•</span>
+              
+              {/* WebRTC Live Status Tag */}
+              <button
+                onClick={() => {
+                  setShowDebugConsole(true);
+                  setIsDebugCollapsed((v) => !v);
+                }}
+                className={`text-[10px] font-medium flex items-center gap-1 px-1.5 py-0.5 rounded-full transition ${
+                  isConnected 
+                    ? 'text-emerald-300 bg-emerald-500/15 border border-emerald-500/30' 
+                    : isDisconnected 
+                    ? 'text-yellow-300 bg-yellow-500/15 border border-yellow-500/30 animate-pulse' 
+                    : isFailed 
+                    ? 'text-red-300 bg-red-500/15 border border-red-500/30' 
+                    : 'text-cyan-300 bg-cyan-500/15 border border-cyan-500/30'
+                }`}
+                title="Toggle Debug Console overlay"
+              >
+                <Wifi className="w-2.5 h-2.5" />
+                <span>WebRTC {isConnected ? 'HD Connected' : isDisconnected ? 'Reconnecting...' : isFailed ? 'Failed (15s grace)...' : iceState}</span>
+              </button>
+
+              {/* Requirement 6: UI indicator showing candidate types found (host/srflx/relay count) */}
+              <button
+                onClick={() => {
+                  setShowDebugConsole(true);
+                  setIsDebugCollapsed(false);
+                }}
+                className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-900/90 border border-zinc-700/80 text-zinc-300 hover:border-zinc-500 transition"
+                title="ICE Candidates: Host (local LAN) | STUN srflx (public IP) | TURN relay"
+              >
+                <span className="text-zinc-500 font-bold text-[9px]">ICE:</span>
+                <span className="text-blue-300" title="Host candidates (local LAN)">🏠{candidateCounts.host}</span>
+                <span className="text-zinc-600">|</span>
+                <span className={candidateCounts.srflx > 0 ? 'text-emerald-300 font-bold' : 'text-zinc-500'} title="STUN srflx candidates (public IP NAT)">
+                  🌐{candidateCounts.srflx}
+                </span>
+                <span className="text-zinc-600">|</span>
+                <span className={candidateCounts.relay > 0 ? 'text-purple-300 font-bold' : 'text-zinc-500'} title="TURN relay candidates (fallback)">
+                  🔄{candidateCounts.relay}
+                </span>
+                {candidateCounts.host > 0 && candidateCounts.srflx === 0 && candidateCounts.relay === 0 && (
+                  <span className="ml-1 px-1 rounded bg-amber-500/20 text-amber-300 text-[8px] font-bold animate-pulse">
+                    Host Only
+                  </span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right HUD: Coin Counter & Diagnostics Trigger */}
+        <div className="flex items-center gap-2">
+          {/* Debug Console Toggle Button */}
+          <button
+            onClick={() => {
+              if (!showDebugConsole) {
+                setShowDebugConsole(true);
+                setIsDebugCollapsed(false);
+              } else {
+                setIsDebugCollapsed((v) => !v);
+              }
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-mono font-bold transition active:scale-95 ${
+              !isDebugCollapsed
+                ? 'bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.5)]'
+                : isDisconnected
+                ? 'bg-yellow-500/30 border border-yellow-400 text-yellow-300 animate-pulse'
+                : 'bg-zinc-800/90 hover:bg-zinc-700/90 text-zinc-300 border border-zinc-700'
+            }`}
+            title="Toggle WebRTC Debug Console overlay"
+          >
+            <Terminal className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Debug</span>
+            <span className="text-[10px] px-1 rounded bg-black/40 text-white font-mono">
+              {logs.length}
+            </span>
+          </button>
+
+          {/* Billing / Role display */}
+          {isOwner ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-300 text-xs backdrop-blur-md">
+              <Crown className="w-3.5 h-3.5 text-amber-400" />
+              <span className="font-black">Owner</span>
+            </div>
+          ) : isCaller ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 border border-amber-500/40 text-amber-300 text-xs backdrop-blur-md">
+              <Coins className="w-3.5 h-3.5 text-amber-400" />
+              <span className="font-bold">{currentUser?.coins_balance} Coins</span>
+              <span className="text-[10px] text-zinc-400">({remainingMinutes}m)</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 border border-cyan-500/40 text-cyan-300 text-xs backdrop-blur-md">
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="font-bold">Earning</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 2. Real-time Status Notice Banner */}
+      {statusNotice && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-black/90 border border-zinc-700 text-white text-xs font-semibold backdrop-blur-md flex items-center gap-2 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-2 h-2 rounded-full bg-[#FF69B4] animate-ping" />
+          <span>{statusNotice}</span>
+        </div>
+      )}
+
+      {/* Disconnection Warning Banner - Retrying without auto-closing (Requirement 3) */}
+      {isDisconnected && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-2xl bg-yellow-500/20 border-2 border-yellow-500 text-yellow-200 text-xs font-bold backdrop-blur-md flex items-center gap-2 shadow-2xl animate-pulse">
+          <AlertTriangle className="w-4 h-4 text-yellow-400" />
+          <span>Network disconnected. Retrying connection via STUN/TURN (will not auto-close)...</span>
+        </div>
+      )}
+
+      {/* 15-Second Failed Grace Period Banner (Requirement 3) */}
+      {isFailed && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-2xl bg-red-500/20 border-2 border-red-500 text-red-200 text-xs font-bold backdrop-blur-md flex items-center gap-2 shadow-2xl animate-pulse">
+          <AlertTriangle className="w-4 h-4 text-red-400" />
+          <span>WebRTC connection failed. Retrying ICE candidate pairs (15s grace period before closing)...</span>
+        </div>
+      )}
+
+      {/* Host Only Network Warning Banner (Requirement 2) */}
+      {candidateCounts.host > 0 && candidateCounts.srflx === 0 && candidateCounts.relay === 0 && iceGatheringState === 'complete' && (
+        <div className="absolute top-36 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-2xl bg-amber-500/20 border border-amber-500 text-amber-200 text-xs font-bold backdrop-blur-md flex items-center gap-2 shadow-2xl">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+          <span>Only host candidates found. Cross-network NAT traversal may require STUN/TURN.</span>
+        </div>
+      )}
+
+      {/* 3. Main Call Stage */}
+      {/* Requirement 3: Ensure video elements have higher z-index (20, 30) than debug panel when collapsed (10) */}
+      <div 
+        style={{ zIndex: 20 }}
+        className="relative z-20 flex-1 w-full h-full flex items-center justify-center"
+      >
+        {isScreenSharing ? (
+          /* Screen Sharing View */
+          <div className="relative z-20 w-full h-full bg-black flex items-center justify-center">
+            <video
+              ref={screenVideoRef}
+              autoPlay
+              playsInline
+              style={{ zIndex: 20 }}
+              className="relative z-20 w-full h-full object-contain"
+            />
+            <div className="absolute top-20 left-4 px-3 py-1.5 rounded-full bg-[#FF69B4]/85 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg backdrop-blur-md z-30">
+              <Monitor className="w-3.5 h-3.5" />
+              Broadcasting Screen
+            </div>
+          </div>
+        ) : isVideoCall ? (
+          /* Video Call View */
+          <div className="relative z-20 w-full h-full flex items-center justify-center bg-[#121217]">
+            {/* Remote Peer Video Stream (muted to let remoteAudioRef handle audio output) */}
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{ zIndex: 20 }}
+              className={`relative z-20 w-full h-full object-cover ${hasRemoteVideo ? 'block' : 'hidden'}`}
+            />
+
+            {/* Fallback Screen if remote peer has not enabled camera or track is connecting */}
+            {!hasRemoteVideo && (
+              <div className="relative z-20 w-full h-full flex items-center justify-center overflow-hidden">
+                <img
+                  src={partnerPic}
+                  alt={partnerName}
+                  className="w-full h-full object-cover filter blur-[3px] opacity-60 scale-105"
+                />
+                <div className="absolute inset-0 bg-black/50" />
+
+                <div className="absolute text-center z-10 p-4">
+                  <div className="relative inline-block mb-3">
+                    <img
+                      src={partnerPic}
+                      alt={partnerName}
+                      className="w-28 h-28 rounded-full object-cover mx-auto border-4 border-[#FF69B4] shadow-[0_0_30px_rgba(255,105,180,0.6)]"
+                    />
+                    {isConnected && (
+                      <span className="absolute bottom-1 right-1 w-5 h-5 rounded-full bg-emerald-500 border-2 border-black flex items-center justify-center">
+                        <Activity className="w-3 h-3 text-black" />
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-xl font-black text-white">{partnerName}</h4>
+                  <p className="text-xs text-zinc-300 font-medium mt-1 flex items-center justify-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 animate-ping' : 'bg-amber-400 animate-pulse'}`} />
+                    {isConnected ? 'Connected • Waiting for camera' : `Connecting via STUN/TURN (${iceState})...`}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Local Video PIP Window - Requirement 3: z-index 30, higher than collapsed debug panel (10) */}
+            <div 
+              style={{ zIndex: 30 }}
+              className="absolute bottom-28 right-4 w-32 h-44 sm:w-36 sm:h-48 bg-zinc-900 rounded-2xl overflow-hidden border-2 border-[#FF69B4] shadow-2xl z-30"
+            >
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                style={{ zIndex: 30 }}
+                className={`relative z-30 w-full h-full object-cover ${isVideoOff ? 'hidden' : 'block'}`}
+              />
+              
+              {/* Camera Off Overlay */}
+              {isVideoOff && (
+                <div className="absolute inset-0 bg-[#14141B] flex flex-col items-center justify-center text-zinc-400 p-2 text-center">
+                  <div className="w-10 h-10 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mb-1.5">
+                    <VideoOff className="w-5 h-5 text-red-400" />
+                  </div>
+                  <span className="text-[11px] font-bold text-white">Camera Off</span>
+                  <span className="text-[9px] text-zinc-500">Audio only</span>
+                </div>
+              )}
+
+              {/* Corner Mic Indicator on PIP */}
+              <div className="absolute top-2 right-2 z-30">
+                {isMuted ? (
+                  <div className="w-6 h-6 rounded-full bg-red-600/90 text-white flex items-center justify-center shadow-md">
+                    <MicOff className="w-3.5 h-3.5" />
+                  </div>
+                ) : isSpeaking ? (
+                  <div className="w-6 h-6 rounded-full bg-emerald-500 text-black flex items-center justify-center shadow-md animate-pulse">
+                    <Mic className="w-3.5 h-3.5 font-bold" />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Voice Call Stage */
+          <div className="flex flex-col items-center justify-center p-6 space-y-6">
+            <div className="relative">
+              <div className="absolute -inset-4 rounded-full bg-[#FF69B4]/20 animate-ring-pulse" />
+              <div className="absolute -inset-8 rounded-full bg-[#FF69B4]/10 animate-ping" />
+              <img
+                src={partnerPic}
+                alt={partnerName}
+                className="w-36 h-36 rounded-full object-cover border-4 border-[#FF69B4] relative z-10 shadow-[0_0_35px_rgba(255,105,180,0.55)]"
+              />
+            </div>
+
+            <div className="text-center space-y-1 z-10">
+              <h3 className="text-2xl font-black text-white">{partnerName}</h3>
+              <p className="text-xs text-zinc-400 flex items-center justify-center gap-1.5">
+                <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                Live Audio Session ({activeCall.rate_per_min || 20} coins/min)
+              </p>
+              <div className="flex items-center justify-center gap-2 text-[11px] font-mono text-zinc-500 pt-1">
+                <span>STUN / TURN NAT</span>
+                <span>•</span>
+                <span className={isConnected ? 'text-emerald-400 font-bold' : 'text-amber-400'}>
+                  {isConnected ? 'P2P Active' : iceState}
+                </span>
+              </div>
+            </div>
+
+            {/* Animated Audio Waveform */}
+            <div className="flex items-center gap-1.5 h-12">
+              {[40, 75, 55, 90, 65, 80, 50, 85, 70, 45].map((height, i) => (
+                <span
+                  key={i}
+                  className="w-1.5 bg-[#FF69B4] rounded-full animate-pulse shadow-[0_0_8px_#FF69B4]"
+                  style={{
+                    height: `${height}%`,
+                    animationDelay: `${i * 0.15}s`,
+                    animationDuration: '0.8s',
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Floating Hearts Animation Layer */}
+      <div 
+        className="fixed inset-0 pointer-events-none overflow-hidden z-40 select-none"
+        aria-hidden="true"
+      >
+        <div className="absolute bottom-24 right-6 sm:right-28 w-36 h-[550px] flex items-end justify-center pointer-events-none">
+          {floatingHearts.map((heart) => (
+            <div
+              key={heart.id}
+              className="absolute bottom-0 animate-floating-heart-rise flex items-center justify-center filter drop-shadow-[0_0_12px_rgba(255,105,180,0.75)] select-none pointer-events-none"
+              style={{
+                left: `calc(50% + ${heart.leftOffset}px)`,
+                fontSize: `${heart.size}px`,
+                ['--heart-duration' as any]: `${heart.duration}s`,
+                ['--sway-x1' as any]: `${heart.swayX1}px`,
+                ['--sway-x2' as any]: `${heart.swayX2}px`,
+                ['--sway-x3' as any]: `${heart.swayX3}px`,
+                ['--sway-x4' as any]: `${heart.swayX4}px`,
+                ['--sway-x5' as any]: `${heart.swayX5}px`,
+                ['--rot-1' as any]: `${heart.rot1}deg`,
+                ['--rot-2' as any]: `${heart.rot2}deg`,
+                ['--rot-3' as any]: `${heart.rot3}deg`,
+                ['--rot-4' as any]: `${heart.rot4}deg`,
+                ['--rot-5' as any]: `${heart.rot5}deg`,
+              }}
+            >
+              {heart.emoji ? (
+                <span className="leading-none">{heart.emoji}</span>
+              ) : (
+                <Heart
+                  style={{
+                    width: `${heart.size}px`,
+                    height: `${heart.size}px`,
+                    color: heart.color,
+                    fill: heart.color,
+                  }}
+                  className="filter drop-shadow-[0_0_10px_currentColor]"
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 4. Floating Control Dock */}
+      <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-1.5rem)] max-w-xl bg-[#111116]/95 backdrop-blur-2xl border border-zinc-700/60 rounded-3xl p-3 px-4 shadow-[0_15px_50px_rgba(0,0,0,0.85)] flex items-center justify-between gap-1 sm:gap-2 transition-all duration-300">
+        
+        {/* A. Mute / Unmute Button */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={handleToggleMic}
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-200 active:scale-90 relative ${
+              isMuted
+                ? 'bg-red-500/25 border-2 border-red-500 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.4)]'
+                : isSpeaking
+                ? 'bg-emerald-500/20 border-2 border-emerald-400 text-emerald-300 shadow-[0_0_25px_rgba(52,211,153,0.5)] scale-105'
+                : 'bg-[#1C1C26] hover:bg-[#252533] border border-zinc-700/80 text-white shadow-sm'
+            }`}
+            title={isMuted ? 'Unmute Microphone' : 'Mute Microphone'}
+          >
+            {isMuted ? (
+              <MicOff className="w-5 h-5 text-red-400" />
+            ) : (
+              <Mic className={`w-5 h-5 ${isSpeaking ? 'text-emerald-400' : 'text-white'}`} />
+            )}
+
+            {!isMuted && isSpeaking && (
+              <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
+            )}
+          </button>
+          <span className={`text-[10px] font-bold tracking-tight ${isMuted ? 'text-red-400' : 'text-zinc-300'}`}>
+            {isMuted ? 'Muted' : 'Mic On'}
+          </span>
+        </div>
+
+        {/* B. Camera Toggle Button */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={handleToggleCamera}
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-200 active:scale-90 relative ${
+              isVideoOff
+                ? 'bg-red-500/25 border-2 border-red-500 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.4)]'
+                : 'bg-[#1C1C26] hover:bg-[#252533] border border-zinc-700/80 text-cyan-400 shadow-sm'
+            }`}
+            title={isVideoOff ? 'Turn Camera On' : 'Turn Camera Off'}
+          >
+            {isVideoOff ? (
+              <VideoOff className="w-5 h-5 text-red-400" />
+            ) : (
+              <Video className="w-5 h-5 text-cyan-400" />
+            )}
+          </button>
+          <span className={`text-[10px] font-bold tracking-tight ${isVideoOff ? 'text-red-400' : 'text-zinc-300'}`}>
+            {isVideoOff ? 'Cam Off' : 'Camera On'}
+          </span>
+        </div>
+
+        {/* C. Screen Share Button */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={handleToggleScreenShare}
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-200 active:scale-90 relative ${
+              isScreenSharing
+                ? 'bg-[#FF69B4] text-white shadow-[0_0_20px_rgba(255,105,180,0.6)]'
+                : 'bg-[#1C1C26] hover:bg-[#252533] border border-zinc-700/80 text-zinc-300'
+            }`}
+            title={isScreenSharing ? 'Stop Screen Sharing' : 'Share Screen'}
+          >
+            {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+          </button>
+          <span className="text-[10px] font-bold tracking-tight text-zinc-300">
+            {isScreenSharing ? 'Sharing' : 'Share'}
+          </span>
+        </div>
+
+        {/* D. Live Chat Button */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={() => setShowChat(!showChat)}
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-200 active:scale-90 relative ${
+              showChat
+                ? 'bg-purple-600 text-white shadow-[0_0_20px_rgba(147,51,234,0.6)]'
+                : 'bg-[#1C1C26] hover:bg-[#252533] border border-zinc-700/80 text-zinc-300'
+            }`}
+            title="Meeting Chat"
+          >
+            <MessageSquare className="w-5 h-5" />
+            {chatMessages.length > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-emerald-500 text-black text-[9px] font-black flex items-center justify-center">
+                {chatMessages.length}
+              </span>
+            )}
+          </button>
+          <span className="text-[10px] font-bold tracking-tight text-zinc-300">Chat</span>
+        </div>
+
+        {/* E. Floating Heart Reaction Button */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={handleSendHeart}
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-200 active:scale-90 relative select-none ${
+              isHeartPopping
+                ? 'bg-gradient-to-tr from-pink-600 to-rose-500 text-white shadow-[0_0_25px_rgba(255,105,180,0.85)] scale-110 animate-heart-pop'
+                : 'bg-pink-500/15 hover:bg-pink-500/25 border border-pink-500/40 text-pink-400 shadow-[0_0_15px_rgba(255,105,180,0.25)]'
+            }`}
+            title="Send Floating Heart Reaction (Tap to shower love)"
+          >
+            <Heart
+              className={`w-5 h-5 transition-transform duration-200 ${
+                isHeartPopping ? 'fill-white stroke-white scale-110' : 'fill-pink-500 stroke-pink-400'
+              }`}
+            />
+            {heartCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-[10px] font-black flex items-center justify-center shadow-lg border border-pink-300 animate-bounce">
+                +{heartCount}
+              </span>
+            )}
+          </button>
+          <span className="text-[10px] font-bold tracking-tight text-pink-300">Heart</span>
+        </div>
+
+        {/* F. Owner Remote Mute Control */}
+        {isOwner && (
+          <div className="flex flex-col items-center gap-1">
+            <button
+              onClick={() => activeCall?.id && ownerMuteCall(activeCall.id, !isMuted)}
+              className="w-12 h-12 rounded-2xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 flex items-center justify-center transition active:scale-90"
+              title="Owner Remote Mute"
+            >
+              <VolumeX className="w-5 h-5" />
+            </button>
+            <span className="text-[10px] font-bold tracking-tight text-amber-300">Owner</span>
+          </div>
+        )}
+
+        {/* G. End Call Button */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={handleExplicitEndCall}
+            className="w-12 h-12 rounded-2xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white shadow-[0_0_25px_rgba(239,68,68,0.65)] flex items-center justify-center active:scale-90 transition transform"
+            title={isOwner ? 'Owner: Terminate Meeting' : 'End Call'}
+          >
+            <PhoneOff className="w-5 h-5" />
+          </button>
+          <span className="text-[10px] font-bold tracking-tight text-red-400">End</span>
+        </div>
+      </div>
+
+      {/* Floating Quick Reaction Heart Button (Right side, tap easily with one hand) */}
+      <div className="fixed bottom-24 right-4 sm:right-8 z-40 flex flex-col items-center gap-1 select-none">
+        <button
+          onClick={handleSendHeart}
+          className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center shadow-[0_4px_25px_rgba(255,105,180,0.5)] backdrop-blur-xl border border-pink-400/40 transition-all duration-150 active:scale-75 ${
+            isHeartPopping
+              ? 'bg-gradient-to-tr from-pink-600 via-rose-500 to-pink-400 text-white scale-120 animate-heart-pop shadow-[0_0_35px_rgba(255,105,180,0.9)]'
+              : 'bg-[#181824]/90 hover:bg-pink-500/25 text-pink-400 hover:scale-105'
+          }`}
+          title="Quick Heart Reaction"
+        >
+          <Heart
+            className={`w-6 h-6 sm:w-7 sm:h-7 transition-all ${
+              isHeartPopping ? 'fill-white stroke-white scale-110' : 'fill-pink-500/90 stroke-pink-300'
+            }`}
+          />
+          {heartCount > 1 && (
+            <span className="absolute -top-1 -right-1 px-1.5 py-0.5 rounded-full bg-rose-500 text-white font-extrabold text-[10px] border border-white/60 shadow-md animate-bounce">
+              x{heartCount}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {/* 5. In-Call Live Chat Drawer */}
+      {showChat && (
+        <div className="absolute right-3 bottom-28 z-50 w-80 max-w-[calc(100vw-24px)] bg-[#101016]/95 backdrop-blur-2xl border border-purple-500/40 rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-4">
+          <div className="p-3 bg-[#151520] border-b border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-purple-400" />
+              <span className="text-xs font-bold text-white">In-Call Chat</span>
+              <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-bold">
+                Firestore Realtime
+              </span>
+            </div>
+            <button
+              onClick={() => setShowChat(false)}
+              className="p-1 text-zinc-400 hover:text-white rounded-lg"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="p-3 h-56 overflow-y-auto space-y-2 text-xs">
+            {chatMessages.length === 0 ? (
+              <div className="text-center text-zinc-500 text-[11px] py-10">
+                No messages yet. Send a message to chat in realtime!
+              </div>
+            ) : (
+              chatMessages.map((msg, i) => {
+                const isMe = (msg.senderId || msg.sender_id) === currentUser?.uid;
+                const isMsgOwner = (msg.senderRole || msg.sender_role) === 'owner';
+                const displayName = msg.senderName || msg.sender_name || (isMe ? 'You' : partnerName);
+                const messageText = msg.text || msg.message;
+                return (
+                  <div
+                    key={msg.id || i}
+                    className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                  >
+                    <div className="text-[10px] text-zinc-500 mb-0.5 flex items-center gap-1">
+                      <span>{displayName}</span>
+                      {isMsgOwner && (
+                        <span className="text-amber-400 font-bold">👑</span>
+                      )}
+                    </div>
+                    <div
+                      className={`py-1.5 px-3 rounded-2xl max-w-[85%] break-words ${
+                        isMe
+                          ? 'bg-purple-600 text-white rounded-tr-none'
+                          : 'bg-[#1C1C28] text-zinc-200 border border-zinc-800 rounded-tl-none'
+                      }`}
+                    >
+                      {messageText}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            <div ref={chatBottomRef} />
+          </div>
+
+          <form onSubmit={handleSendChat} className="p-2 border-t border-zinc-800 flex gap-1.5 bg-[#0C0C12]">
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Type message..."
+              className="flex-1 bg-[#161622] border border-zinc-700 rounded-xl px-3 py-1.5 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-purple-500"
+            />
+            <button
+              type="submit"
+              className="p-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white transition active:scale-95"
+            >
+              <Send className="w-3.5 h-3.5" />
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* 6. WebRTC Collapsible Debug Console Overlay */}
+      <DebugConsole
+        isOpen={showDebugConsole}
+        onClose={() => setShowDebugConsole(false)}
+        logs={logs}
+        signalingState={signalingState}
+        iceState={iceState}
+        connectionState={connectionState}
+        iceGatheringState={iceGatheringState}
+        candidateCounts={candidateCounts}
+        onClearLogs={() => setLogs([])}
+        defaultCollapsed={true}
+        isCollapsed={isDebugCollapsed}
+        onToggleCollapse={setIsDebugCollapsed}
+      />
+    </div>
+  );
+};
+
+
+================================================================================
+END OF BACKUP
+================================================================================

@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .glow-pink {
+    box-shadow: 0 0 20px rgba(255, 105, 180, 0.45);
+    border-color: #FF69B4;
+  }
+  .glow-pink-sm {
+    box-shadow: 0 0 10px rgba(255, 105, 180, 0.35);
+  }
+  .glow-pink-lg {
+    box-shadow: 0 0 35px rgba(255, 105, 180, 0.55);
+  }
+}
+
+:root {
+  color-scheme: dark;
+  --app-bg: #0f0f1a;
+  --card-bg: #161622;
+  --accent-pink: #ff4d8d;
+}
+
+body {
+  background-color: #0f0f1a;
+  color: #FFFFFF;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f0f1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #23232C;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #FF69B4;
+}
+
+/* Animation utilities */
+@keyframes ringPulse {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(255, 105, 180, 0.7);
+  }
+  70% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 25px rgba(255, 105, 180, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(255, 105, 180, 0);
+  }
+}
+
+.animate-ring-pulse {
+  animation: ringPulse 1.8s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite linear;
+}
+
+@keyframes floatHeart {
+  0% {
+    transform: translateY(105vh) scale(0.7) rotate(-12deg);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.55;
+  }
+  85% {
+    opacity: 0.45;
+  }
+  100% {
+    transform: translateY(-10vh) scale(1.15) rotate(15deg);
+    opacity: 0;
+  }
+}
+
+.animate-float-heart {
+  animation: floatHeart linear infinite;
+}
+
+/* CallScreen Interactive Floating Hearts */
+@keyframes floatingHeartRise {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.4) rotate(0deg);
+    opacity: 0;
+  }
+  12% {
+    transform: translate3d(var(--sway-x1, -8px), -45px, 0) scale(1.2) rotate(var(--rot-1, -12deg));
+    opacity: 1;
+  }
+  38% {
+    transform: translate3d(var(--sway-x2, 14px), -140px, 0) scale(1.08) rotate(var(--rot-2, 10deg));
+    opacity: 0.95;
+  }
+  68% {
+    transform: translate3d(var(--sway-x3, -16px), -260px, 0) scale(0.95) rotate(var(--rot-3, -8deg));
+    opacity: 0.85;
+  }
+  88% {
+    transform: translate3d(var(--sway-x4, 8px), -360px, 0) scale(0.85) rotate(var(--rot-4, 14deg));
+    opacity: 0.5;
+  }
+  100% {
+    transform: translate3d(var(--sway-x5, -6px), -440px, 0) scale(0.6) rotate(var(--rot-5, 0deg));
+    opacity: 0;
+  }
+}
+
+.animate-floating-heart-rise {
+  animation: floatingHeartRise var(--heart-duration, 2.2s) cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
+@keyframes heartButtonPop {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.35) rotate(-10deg);
+  }
+  65% {
+    transform: scale(0.88) rotate(6deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+.animate-heart-pop {
+  animation: heartButtonPop 0.35s ease-out;
+}
+

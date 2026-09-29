@@ -1,0 +1,38 @@
+{
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "name": "Meet Up - Meet. Connect. Date.",
+  "short_name": "Meet Up",
+  "description": "Connect with friendly listeners and dates via real-time HD audio and video calls.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0B0B0E",
+  "theme_color": "#FF69B4",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

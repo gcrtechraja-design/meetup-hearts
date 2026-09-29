@@ -1,0 +1,11 @@
+{
+  "name": "Remix Remix Meet Up",
+  "description": "Mobile-first Social Discovery \u0026 Dating Web App with Live Audio/Video Calling, Real-time Coin Balance, and Listener Discovery.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

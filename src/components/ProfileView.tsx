@@ -1,0 +1,987 @@
+import React, { useRef, useState } from 'react';
+import { 
+  User, 
+  Coins, 
+  Sparkles, 
+  Receipt, 
+  Globe, 
+  Headphones, 
+  HelpCircle, 
+  Settings, 
+  LogOut, 
+  FileText, 
+  Shield, 
+  Trash2, 
+  ChevronRight,
+  UserCheck,
+  Camera,
+  Video,
+  CheckCircle2,
+  Crown,
+  Heart,
+  Pencil,
+  Check,
+  X,
+  Loader2,
+  Image as ImageIcon,
+  Bell,
+  MapPin,
+  AlertCircle
+} from 'lucide-react';
+import { FavoritesModal } from './FavoritesModal';
+import { AvatarPickerBottomSheet } from './AvatarPickerBottomSheet';
+import { BackgroundCallNotificationsModal } from './BackgroundCallNotificationsModal';
+import { useAuth } from '../context/AuthContext';
+import { useTranslation, SupportedLanguage, LANGUAGES } from '../utils/i18n';
+import { getStaticCdnUrl, uploadImageToStaticCdn, getUserAvatarUrl, getDefaultFemaleAvatar } from '../services/staticCdnService';
+import { uploadPhotoToSupabase, syncUserToSupabase } from '../services/supabase';
+import { doc, updateDoc } from 'firebase/firestore';
+import { updateProfile } from 'firebase/auth';
+import { db, auth } from '../firebase/config';
+import { isListenerOffline } from '../utils/presence';
+import { CITIES, findCity } from '../utils/cities';
+import { isUserAdmin, isMeetupOwner } from '../utils/admin';
+import appLogo from '../assets/images/app_logo_1790170748297.jpg';
+
+interface ProfileViewProps {
+  onOpenWallet: () => void;
+  onOpenTransactions: () => void;
+  onOpenLanguage: () => void;
+  onOpenListenerApply: () => void;
+  onOpenTerms: () => void;
+  onOpenPrivacy: () => void;
+  onOpenHelp: () => void;
+  onOpenZegoConfig: () => void;
+  onOpenAdmin?: () => void;
+  onOpenOwner?: () => void;
+  onOpenAuth?: () => void;
+  onVoiceCall?: (user: any) => void;
+  onVideoCall?: (user: any) => void;
+  onOpenProfile?: (user: any) => void;
+}
+
+export const ProfileView: React.FC<ProfileViewProps> = ({
+  onOpenWallet,
+  onOpenTransactions,
+  onOpenLanguage,
+  onOpenListenerApply,
+  onOpenTerms,
+  onOpenPrivacy,
+  onOpenHelp,
+  onOpenZegoConfig,
+  onOpenAdmin,
+  onOpenOwner,
+  onOpenAuth,
+  onVoiceCall,
+  onVideoCall,
+  onOpenProfile,
+}) => {
+  const { currentUser, logout, deleteMyAccount, requestPushPermission } = useAuth();
+  const lang = (currentUser?.language?.toUpperCase() || 'EN') as SupportedLanguage;
+  const { t } = useTranslation(lang);
+  const [showFavorites, setShowFavorites] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingPic, setUploadingPic] = useState(false);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const [updatingPresence, setUpdatingPresence] = useState(false);
+
+  // Avatar Picker Bottom Sheet & Edit Name State
+  const [showAvatarSheet, setShowAvatarSheet] = useState(false);
+  const [sheetInitialView, setSheetInitialView] = useState<'menu' | 'avatars'>('menu');
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [savingName, setSavingName] = useState(false);
+  const [isEditingCity, setIsEditingCity] = useState(false);
+
+  // Background Call Notifications Bottom Sheet & Toast State
+  const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const toastTimerRef = useRef<any>(null);
+
+  const showToast = (text: string, type: 'success' | 'info' | 'error' = 'success') => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToastMessage({ text, type });
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, 3500);
+  };
+
+  const isBgNotifyActive = 
+    currentUser?.background_call_notify !== false &&
+    (typeof window !== 'undefined' ? localStorage.getItem('background_call_notify') !== 'false' : true);
+
+  const currentLangLabel = LANGUAGES.find((l) => l.code === lang)?.label || 'English';
+  const isCurrentListenerOffline = isListenerOffline(currentUser);
+  const isAdmin = isUserAdmin(currentUser);
+
+  if (!currentUser) {
+    return (
+      <div className="space-y-4 pb-24">
+        {/* Guest Profile Card */}
+        <div className="p-6 bg-[#16161C] border border-[#23232C] rounded-3xl text-center relative overflow-hidden">
+          <div className="relative w-20 h-20 mx-auto mb-3 rounded-full p-[2px] bg-gradient-to-tr from-[#FF69B4] to-purple-500 shadow-[0_0_16px_rgba(255,105,180,0.4)]">
+            <img
+              src={appLogo}
+              alt="Meet Up Guest"
+              className="w-full h-full rounded-full object-cover bg-black"
+            />
+          </div>
+          <h2 className="text-xl font-black text-white">Welcome, Guest!</h2>
+          <p className="text-xs text-zinc-400 mt-1 max-w-xs mx-auto">
+            You are browsing Meet Up in public mode. Explore listeners, voice intros, or sign in to start live 1-on-1 calls.
+          </p>
+
+          <button
+            onClick={onOpenAuth}
+            className="mt-4 w-full py-3 rounded-2xl bg-gradient-to-r from-[#FF69B4] to-pink-600 text-white text-sm font-bold shadow-[0_0_20px_rgba(255,105,180,0.4)] hover:brightness-110 active:scale-98 transition flex items-center justify-center gap-2"
+          >
+            <Sparkles className="w-4 h-4 text-white" />
+            Sign In / Create Account
+          </button>
+        </div>
+
+        {/* Quick Settings & Help for Guests */}
+        <div className="bg-[#16161C] border border-[#23232C] rounded-2xl p-2 divide-y divide-[#23232C]/50 text-sm">
+          <button
+            onClick={onOpenLanguage}
+            className="w-full p-3 flex items-center justify-between text-zinc-300 hover:text-white transition"
+          >
+            <div className="flex items-center gap-3">
+              <Globe className="w-5 h-5 text-indigo-400" />
+              <span>Language: <strong className="text-white">{currentLangLabel}</strong></span>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-600" />
+          </button>
+
+          <button
+            onClick={onOpenListenerApply}
+            className="w-full p-3 flex items-center justify-between text-zinc-300 hover:text-white transition"
+          >
+            <div className="flex items-center gap-3">
+              <UserCheck className="w-5 h-5 text-emerald-400" />
+              <span>Become a Verified Listener</span>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-600" />
+          </button>
+
+          <button
+            onClick={onOpenTerms}
+            className="w-full p-3 flex items-center justify-between text-zinc-300 hover:text-white transition"
+          >
+            <div className="flex items-center gap-3">
+              <FileText className="w-5 h-5 text-zinc-400" />
+              <span>Terms of Service</span>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-600" />
+          </button>
+
+          <button
+            onClick={onOpenPrivacy}
+            className="w-full p-3 flex items-center justify-between text-zinc-300 hover:text-white transition"
+          >
+            <div className="flex items-center gap-3">
+              <Shield className="w-5 h-5 text-zinc-400" />
+              <span>Privacy Policy</span>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-600" />
+          </button>
+
+          <button
+            onClick={onOpenHelp}
+            className="w-full p-3 flex items-center justify-between text-zinc-300 hover:text-white transition"
+          >
+            <div className="flex items-center gap-3">
+              <HelpCircle className="w-5 h-5 text-zinc-400" />
+              <span>Help & Safety Center</span>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-600" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const handleToggleListenerPresence = async () => {
+    if (!currentUser || updatingPresence) return;
+    setUpdatingPresence(true);
+    try {
+      const willBeOffline = !isCurrentListenerOffline;
+      const newStatus = willBeOffline ? 'unavailable' : 'online';
+      const newPresence = willBeOffline ? 'unavailable' : 'available';
+      const newIsAvailable = !willBeOffline;
+
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        status: newStatus,
+        presence_status: newPresence,
+        presence: newPresence,
+        is_available: newIsAvailable,
+      });
+      setUploadNotice(`Presence updated: ${willBeOffline ? 'Unavailable (Offline)' : 'Available (Online)'}`);
+      setTimeout(() => setUploadNotice(null), 3000);
+    } catch (e: any) {
+      console.error('Failed to update presence status in Firestore:', e);
+      alert(e.message || 'Failed to update presence.');
+    } finally {
+      setUpdatingPresence(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (confirm('CRITICAL: Are you sure you want to permanently delete your Meet Up account? All coins, records and data will be erased.')) {
+      await deleteMyAccount();
+    }
+  };
+
+  // Upload user profile image through Supabase Storage 'photos' bucket
+  const handleProfileImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !currentUser) return;
+
+    // File validation (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      alert('Photo size exceeds 10MB limit. Please select a smaller photo.');
+      if (e.target) e.target.value = '';
+      return;
+    }
+
+    setUploadingPic(true);
+    setUploadNotice('Uploading photo to Supabase Storage...');
+
+    try {
+      // 1. Upload selected photo to 'photos' bucket and get public URL
+      const publicUrl = await uploadPhotoToSupabase(file, currentUser.uid);
+
+      // 2. Persist public URL to Firestore user profile
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        profile_pic: publicUrl,
+        avatar_url: publicUrl,
+      });
+
+      // 3. Sync to Supabase users table if available
+      try {
+        await syncUserToSupabase({
+          ...currentUser,
+          profile_pic: publicUrl,
+          avatar_url: publicUrl,
+        });
+      } catch (syncErr) {
+        console.warn('Notice: user table sync after photo upload:', syncErr);
+      }
+
+      setUploadNotice('Photo uploaded to Supabase Storage & updated successfully!');
+      setTimeout(() => setUploadNotice(null), 3500);
+    } catch (err: any) {
+      console.error('Supabase photo upload error:', err);
+      // Fallback if Supabase credentials are not yet set in environment
+      if (err.message?.includes('Supabase is not configured')) {
+        try {
+          const fallbackUrl = await uploadImageToStaticCdn(file);
+          await updateDoc(doc(db, 'users', currentUser.uid), {
+            profile_pic: fallbackUrl,
+          });
+          setUploadNotice('Photo saved to profile (Supabase credentials pending in env)');
+          setTimeout(() => setUploadNotice(null), 3500);
+          return;
+        } catch {}
+      }
+      alert(err.message || 'Photo upload failed. Please verify Supabase Storage configuration.');
+    } finally {
+      setUploadingPic(false);
+      // Reset input element value so user can re-upload if needed
+      if (e.target) e.target.value = '';
+    }
+  };
+
+  // Revert / set cute female avatar for real customers
+  const handleUseFemaleAvatar = async () => {
+    if (!currentUser) return;
+    setUploadingPic(true);
+    try {
+      const avatarUrl = getDefaultFemaleAvatar(currentUser.uid);
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        profile_pic: avatarUrl,
+      });
+      setUploadNotice('Cute female avatar illustration set as your default!');
+      setTimeout(() => setUploadNotice(null), 3000);
+    } catch (err: any) {
+      console.error('Failed to set female avatar:', err);
+    } finally {
+      setUploadingPic(false);
+    }
+  };
+
+  // Save selected avatar (e.g. from 100 Dicebear avatars) to Firestore user profile
+  const handleSaveAvatar = async (avatarUrl: string) => {
+    if (!currentUser) return;
+    setUploadingPic(true);
+    setUploadNotice(null);
+    try {
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        profile_pic: avatarUrl,
+      });
+      setUploadNotice('Avatar updated successfully!');
+      setTimeout(() => setUploadNotice(null), 3000);
+    } catch (err: any) {
+      console.error('Failed to update avatar in Firestore:', err);
+      alert(err.message || 'Failed to update avatar.');
+    } finally {
+      setUploadingPic(false);
+    }
+  };
+
+  // Save updated name to Firestore user profile and sync auth display name
+  const handleSaveName = async () => {
+    const trimmed = nameInput.trim();
+    if (!trimmed || !currentUser) return;
+    setSavingName(true);
+    try {
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        name: trimmed,
+      });
+      if (auth.currentUser) {
+        try {
+          await updateProfile(auth.currentUser, { displayName: trimmed });
+        } catch {
+          // Non-critical if auth display name sync fails
+        }
+      }
+      setIsEditingName(false);
+      setUploadNotice('Name updated successfully!');
+      setTimeout(() => setUploadNotice(null), 3000);
+    } catch (err: any) {
+      console.error('Failed to update name in Firestore:', err);
+      alert(err.message || 'Failed to update name.');
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const cdnAvatarUrl = getUserAvatarUrl(currentUser);
+  const isCustomUploadedPhoto = !!(
+    currentUser?.profile_pic &&
+    (currentUser.profile_pic.startsWith('data:image/') ||
+      currentUser.profile_pic.startsWith('blob:') ||
+      (currentUser.profile_pic.startsWith('http') && !currentUser.profile_pic.includes('dicebear.com')))
+  );
+
+  return (
+    <div className="space-y-4 pb-24">
+      {/* Profile Header Card */}
+      <div className="p-5 bg-[#16161C] border border-[#23232C] rounded-3xl relative overflow-hidden">
+        <div className="flex items-center gap-4">
+          {/* Avatar with photo upload button & bottom sheet trigger */}
+          <div 
+            onClick={() => {
+              setSheetInitialView('menu');
+              setShowAvatarSheet(true);
+            }}
+            className="relative group cursor-pointer"
+            title="Change Profile Picture"
+          >
+            <img
+              src={cdnAvatarUrl}
+              alt={currentUser?.name}
+              className="w-16 h-16 rounded-full object-cover border-2 border-[#FF69B4] shadow-[0_0_12px_rgba(255,105,180,0.4)] group-hover:brightness-90 transition"
+            />
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSheetInitialView('menu');
+                setShowAvatarSheet(true);
+              }}
+              disabled={uploadingPic}
+              className="absolute -bottom-1 -right-1 p-1.5 rounded-full bg-[#FF69B4] hover:bg-pink-600 text-white shadow-md transition active:scale-95"
+              title="Change profile picture"
+            >
+              <Camera className="w-3.5 h-3.5" />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleProfileImageChange}
+            />
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {isEditingName ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSaveName();
+                }}
+                className="flex items-center gap-1.5 mb-1"
+              >
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  placeholder="Enter name"
+                  maxLength={32}
+                  autoFocus
+                  disabled={savingName}
+                  className="bg-[#0B0B0E] border border-[#FF69B4] rounded-xl px-2.5 py-1 text-sm font-bold text-white focus:outline-none focus:ring-1 focus:ring-[#FF69B4] min-w-0 flex-1 max-w-[170px]"
+                />
+                <button
+                  type="submit"
+                  disabled={savingName || !nameInput.trim()}
+                  className="p-1.5 rounded-xl bg-[#FF69B4] hover:bg-pink-600 text-white transition active:scale-95 disabled:opacity-50"
+                  title="Save name"
+                >
+                  {savingName ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingName(false)}
+                  disabled={savingName}
+                  className="p-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition active:scale-95"
+                  title="Cancel"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </form>
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-lg font-black text-white truncate max-w-[180px]">{currentUser?.name || 'Member'}</h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameInput(currentUser?.name || '');
+                    setIsEditingName(true);
+                  }}
+                  className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition active:scale-95"
+                  title="Edit name"
+                >
+                  <Pencil className="w-3.5 h-3.5 text-[#FF69B4]" />
+                </button>
+                {isAdmin && (
+                  <span className="px-2 py-0.5 rounded-full bg-[#FF69B4]/20 border border-[#FF69B4] text-[#FF69B4] text-[10px] font-bold">
+                    Admin
+                  </span>
+                )}
+                {currentUser?.role === 'listener' && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold flex items-center gap-1">
+                    <UserCheck className="w-3 h-3" />
+                    Listener
+                  </span>
+                )}
+              </div>
+            )}
+            <p className="text-xs text-zinc-400 mt-0.5">{currentUser?.email}</p>
+            {/* City & Location selector */}
+            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+              <MapPin className="w-3.5 h-3.5 text-[#FF69B4] shrink-0" />
+              {isEditingCity ? (
+                <div className="flex items-center gap-1">
+                  <select
+                    value={currentUser?.city || 'Chennai'}
+                    onChange={async (e) => {
+                      const cityName = e.target.value;
+                      const cityInfo = findCity(cityName);
+                      await updateDoc(doc(db, 'users', currentUser.uid), {
+                        city: cityInfo.name,
+                        location: `${cityInfo.name}, ${cityInfo.state}`,
+                        latitude: cityInfo.lat,
+                        longitude: cityInfo.lng,
+                      });
+                      setIsEditingCity(false);
+                      setUploadNotice('City & GPS coordinates saved!');
+                      setTimeout(() => setUploadNotice(null), 3000);
+                    }}
+                    className="bg-[#0B0B0E] border border-[#FF69B4] rounded-lg px-2 py-0.5 text-xs text-white focus:outline-none"
+                  >
+                    {CITIES.map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}, {c.state}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => setIsEditingCity(false)}
+                    className="p-1 rounded bg-zinc-800 text-zinc-400 hover:text-white text-[10px]"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <span className="text-xs text-zinc-300 font-medium">
+                    {currentUser?.city ? `${currentUser.city} (${currentUser.location})` : currentUser?.location || 'Chennai, Tamil Nadu'}
+                  </span>
+                  <button
+                    onClick={() => setIsEditingCity(true)}
+                    className="p-0.5 text-[#FF69B4] hover:text-pink-300 transition"
+                    title="Change City"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Real Customer Avatar Controls: Upload Real Photo or Choose from 100 Avatars */}
+        {currentUser?.role === 'user' && (
+          <div className="mt-4 pt-3 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-[#FF69B4]"></span>
+              {isCustomUploadedPhoto ? (
+                <span>Using <strong className="text-white">Uploaded Photo</strong></span>
+              ) : currentUser?.profile_pic?.includes('dicebear.com/7.x/avataaars') ? (
+                <span>Using <strong className="text-[#FF69B4]">Cartoon Avatar</strong></span>
+              ) : (
+                <span>Using <strong className="text-[#FF69B4]">Cute Female Avatar</strong></span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setSheetInitialView('menu');
+                  setShowAvatarSheet(true);
+                }}
+                disabled={uploadingPic}
+                className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-[#FF69B4]/15 hover:bg-[#FF69B4]/25 text-[#FF69B4] border border-[#FF69B4]/30 transition flex items-center gap-1"
+              >
+                <Camera className="w-3 h-3" />
+                Change Picture
+              </button>
+              <button
+                onClick={() => {
+                  setSheetInitialView('avatars');
+                  setShowAvatarSheet(true);
+                }}
+                disabled={uploadingPic}
+                className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-[#FF69B4]/15 hover:bg-[#FF69B4]/25 text-[#FF69B4] border border-[#FF69B4]/30 transition flex items-center gap-1 cursor-pointer"
+              >
+                <Sparkles className="w-3 h-3 text-[#FF69B4]" />
+                15 3D Realistic Avatars
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Listener Availability & Presence Toggle */}
+        {currentUser?.role === 'listener' && (
+          <div className="mt-4 p-3.5 bg-[#0B0B0E] rounded-2xl border border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <span className={`w-2.5 h-2.5 rounded-full ${isCurrentListenerOffline ? 'bg-zinc-500' : 'bg-emerald-400 animate-pulse'}`}></span>
+              <div>
+                <span className="text-xs font-bold text-white block">
+                  Presence Status: {isCurrentListenerOffline ? 'Unavailable (Offline)' : 'Available (Online)'}
+                </span>
+                <span className="text-[10px] text-zinc-400 block">
+                  {isCurrentListenerOffline
+                    ? 'Your card is marked Offline in the discovery feed.'
+                    : 'Your card is active and accepting incoming calls.'}
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleToggleListenerPresence}
+              disabled={updatingPresence}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                isCurrentListenerOffline
+                  ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30'
+                  : 'bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+              }`}
+            >
+              {updatingPresence
+                ? 'Updating...'
+                : isCurrentListenerOffline
+                ? 'Go Online'
+                : 'Set Unavailable'}
+            </button>
+          </div>
+        )}
+
+        {/* Listener Call Preference Toggle (Allow Video Calls ON/OFF) */}
+        {currentUser?.role === 'listener' && (
+          <div className="mt-3 p-3.5 bg-[#0B0B0E] rounded-2xl border border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className={`p-2 rounded-xl ${currentUser.allowVideoCalls !== false ? 'bg-[#FF69B4]/20 text-[#FF69B4]' : 'bg-zinc-800 text-zinc-500'}`}>
+                <Video className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-xs font-bold text-white block">
+                  Allow Video Calls: {currentUser.allowVideoCalls !== false ? 'ON' : 'OFF'}
+                </span>
+                <span className="text-[10px] text-zinc-400 block">
+                  {currentUser.allowVideoCalls !== false
+                    ? 'Both Audio and Video call buttons are visible on your card & profile.'
+                    : 'Audio Only: Video call button is hidden on your card & profile.'}
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={async () => {
+                const newPref = currentUser.allowVideoCalls === false;
+                await updateDoc(doc(db, 'users', currentUser.uid), {
+                  allowVideoCalls: newPref,
+                });
+                setUploadNotice(`Video calls ${newPref ? 'enabled (Audio + Video)' : 'disabled (Audio Only)'}`);
+                setTimeout(() => setUploadNotice(null), 3000);
+              }}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                currentUser.allowVideoCalls !== false ? 'bg-[#FF69B4]' : 'bg-zinc-700'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                  currentUser.allowVideoCalls !== false ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        )}
+
+        {/* Listener 3D Avatar Picker Row */}
+        {currentUser?.role === 'listener' && (
+          <div className="mt-3 p-3.5 bg-[#0B0B0E] rounded-2xl border border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-pink-500/20 text-[#FF69B4]">
+                <Sparkles className="w-4 h-4 text-[#FF69B4]" />
+              </div>
+              <div>
+                <span className="text-xs font-bold text-white block">
+                  Listener 3D Realistic Avatar
+                </span>
+                <span className="text-[10px] text-zinc-400 block">
+                  Choose from 15 realistic 3D illustrated portraits (10 Female, 5 Male)
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setSheetInitialView('avatars');
+                setShowAvatarSheet(true);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-[#FF69B4]/20 border border-[#FF69B4]/40 text-[#FF69B4] hover:bg-[#FF69B4]/30 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>Choose Avatar</span>
+            </button>
+          </div>
+        )}
+
+        {uploadingPic && (
+          <div className="mt-3 text-xs text-pink-300 font-medium flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-[#FF69B4] animate-ping"></span>
+            Uploading photo to Supabase Storage 'photos' bucket...
+          </div>
+        )}
+
+        {uploadNotice && (
+          <div className="mt-3 p-2 bg-emerald-500/20 border border-emerald-500/40 rounded-xl text-emerald-300 text-xs flex items-center gap-1.5">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{uploadNotice}</span>
+          </div>
+        )}
+
+        {/* Balance Badges */}
+        <div className="grid grid-cols-2 gap-2 mt-4 pt-4 border-t border-zinc-800">
+          <div
+            onClick={onOpenWallet}
+            className="p-3 bg-[#0B0B0E] rounded-2xl border border-zinc-800/80 cursor-pointer hover:border-amber-500/50 transition flex items-center justify-between"
+          >
+            <div>
+              <span className="text-[11px] text-zinc-400 block font-medium">Coin Balance</span>
+              <span className="text-lg font-black text-amber-300">
+                {currentUser?.coins_balance?.toLocaleString() ?? 0}
+              </span>
+            </div>
+            <div className="w-7 h-7 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center">
+              <Coins className="w-4 h-4" />
+            </div>
+          </div>
+
+          <div className="p-3 bg-[#0B0B0E] rounded-2xl border border-zinc-800/80 flex items-center justify-between">
+            <div>
+              <span className="text-[11px] text-zinc-400 block font-medium">Diamonds</span>
+              <span className="text-lg font-black text-cyan-400">
+                {currentUser?.diamonds_balance?.toLocaleString() ?? 0}
+              </span>
+            </div>
+            <div className="w-7 h-7 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center">
+              <Sparkles className="w-4 h-4" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Profile Menu Actions */}
+      <div className="bg-[#16161C] border border-[#23232C] rounded-3xl divide-y divide-zinc-800/70 overflow-hidden">
+        {/* Wallet */}
+        <button
+          onClick={onOpenWallet}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400">
+              <Coins className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white">{t('wallet')}</div>
+              <div className="text-[11px] text-zinc-400">Recharge coins for voice & video calls</div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* My Favourites */}
+        <button
+          onClick={() => setShowFavorites(true)}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-[#ff4d8d]/20 text-[#ff4d8d]">
+              <Heart className="w-4 h-4 fill-[#ff4d8d]" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white">My Favourites</div>
+              <div className="text-[11px] text-zinc-400">View and call your saved listeners</div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* ZEGOCLOUD Video/Voice Settings - ADMIN ONLY */}
+        {currentUser?.role === 'admin' && (
+          <button
+            onClick={onOpenZegoConfig}
+            className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+          >
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-[#FF69B4]/20 text-[#FF69B4]">
+                <Video className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <span>ZEGOCLOUD Calling SDK</span>
+                  <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-black uppercase">Admin Only</span>
+                </div>
+                <div className="text-[11px] text-zinc-400">AppID, Server Secret & Screen Share config</div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-500" />
+          </button>
+        )}
+
+        {/* Transactions */}
+        <button
+          onClick={onOpenTransactions}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400">
+              <Receipt className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white">{t('transactions')}</div>
+              <div className="text-[11px] text-zinc-400">View recharge payment records</div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* Background Call Notifications (FCM / WhatsApp-style) */}
+        <button
+          onClick={async () => {
+            if (requestPushPermission) {
+              await requestPushPermission();
+              setUploadNotice('Notification permission requested!');
+              setTimeout(() => setUploadNotice(null), 3000);
+            }
+          }}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-purple-500/20 text-purple-400">
+              <Bell className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white flex items-center gap-2">
+                <span>Background Call Notifications</span>
+                {typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted' && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[9px] font-bold">
+                    Active
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] text-zinc-400">
+                {typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
+                  ? 'FCM background push alerts active (WhatsApp-style)'
+                  : 'Tap to enable background incoming call alerts'}
+              </div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* Language Switcher */}
+        <button
+          onClick={onOpenLanguage}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-blue-500/20 text-blue-400">
+              <Globe className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white">{t('language')}</div>
+              <div className="text-[11px] text-zinc-400">{currentLangLabel} ({lang})</div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* Become a Listener */}
+        {currentUser?.role !== 'listener' && (
+          <button
+            onClick={onOpenListenerApply}
+            className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+          >
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-[#FF69B4]/20 text-[#FF69B4]">
+                <Headphones className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white">{t('switchToListener')}</div>
+                <div className="text-[11px] text-zinc-400">Apply to earn diamonds from live calls</div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-500" />
+          </button>
+        )}
+
+        {/* Super Owner Control Center */}
+        {onOpenOwner && isMeetupOwner(currentUser?.email) && (
+          <button
+            onClick={onOpenOwner}
+            className="w-full p-4 flex items-center justify-between text-left hover:bg-amber-500/10 transition border-l-2 border-amber-500"
+          >
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400">
+                <Crown className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-amber-300 flex items-center gap-1.5">
+                  <span>Meet Up Owner Control</span>
+                  <span className="px-1.5 py-0.2 rounded bg-amber-500 text-black text-[9px] font-black uppercase">👑 Super</span>
+                </div>
+                <div className="text-[11px] text-zinc-400">Live calls, mute/kick, Supabase & APK build</div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-amber-400" />
+          </button>
+        )}
+
+        {/* Admin Dashboard if role == admin */}
+        {isAdmin && onOpenAdmin && (
+          <button
+            onClick={onOpenAdmin}
+            className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+          >
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-purple-500/20 text-purple-400">
+                <Shield className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-sm font-bold text-white">{t('adminDashboard')}</div>
+                <div className="text-[11px] text-zinc-400">Manage users, reports, approvals & revenue</div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-500" />
+          </button>
+        )}
+
+        {/* Help */}
+        <button
+          onClick={onOpenHelp}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-cyan-500/20 text-cyan-400">
+              <HelpCircle className="w-4 h-4" />
+            </div>
+            <div className="text-sm font-bold text-white">{t('help')}</div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* Terms */}
+        <button
+          onClick={onOpenTerms}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-zinc-700/30 text-zinc-400">
+              <FileText className="w-4 h-4" />
+            </div>
+            <div className="text-sm font-bold text-white">{t('terms')}</div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+
+        {/* Privacy */}
+        <button
+          onClick={onOpenPrivacy}
+          className="w-full p-4 flex items-center justify-between text-left hover:bg-[#1E1E26] transition"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-zinc-700/30 text-zinc-400">
+              <Shield className="w-4 h-4" />
+            </div>
+            <div className="text-sm font-bold text-white">{t('privacy')}</div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500" />
+        </button>
+      </div>
+
+      {/* Danger Zone & Logout */}
+      <div className="space-y-2 pt-2">
+        <button
+          onClick={logout}
+          className="w-full p-3.5 rounded-2xl bg-[#16161C] hover:bg-[#202028] border border-[#23232C] text-zinc-300 font-bold text-xs flex items-center justify-center gap-2 transition"
+        >
+          <LogOut className="w-4 h-4" />
+          {t('logout')}
+        </button>
+
+        <button
+          onClick={handleDeleteAccount}
+          className="w-full p-3.5 rounded-2xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 font-bold text-xs flex items-center justify-center gap-2 transition"
+        >
+          <Trash2 className="w-4 h-4" />
+          Delete My Account (Hard Delete)
+        </button>
+      </div>
+
+      {/* My Favourites Modal */}
+      <FavoritesModal
+        isOpen={showFavorites}
+        onClose={() => setShowFavorites(false)}
+        onVoiceCall={onVoiceCall || (() => {})}
+        onVideoCall={onVideoCall || (() => {})}
+        onOpenProfile={onOpenProfile || (() => {})}
+      />
+
+      {/* Profile Picture Change Bottom Sheet (Upload or 100 Avatars) */}
+      <AvatarPickerBottomSheet
+        isOpen={showAvatarSheet}
+        onClose={() => setShowAvatarSheet(false)}
+        currentAvatarUrl={cdnAvatarUrl}
+        onUploadFromDevice={() => fileInputRef.current?.click()}
+        onSaveAvatar={handleSaveAvatar}
+        initialView={sheetInitialView}
+      />
+    </div>
+  );
+};
