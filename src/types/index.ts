@@ -160,6 +160,9 @@ export interface CoinPackage {
   id: string;
   coins: number;
   price_inr: number;
+  original_price_inr?: number;
+  discount_text?: string;
+  badge?: 'hot' | 'value' | string;
   tag?: string;
   popular?: boolean;
 }
