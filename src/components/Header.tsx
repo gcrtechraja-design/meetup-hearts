@@ -80,7 +80,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenWallet, onOpenAdmin, onOpe
                 <Coins className="w-3.5 h-3.5" />
               </div>
               <span className="text-sm font-bold text-amber-300">
-                {currentUser.coins_balance?.toLocaleString() ?? 0}
+                {(currentUser.coins_balance ?? currentUser.coin_balance ?? 0).toLocaleString()}
               </span>
               <span className="text-xs text-zinc-400 group-hover:text-white transition">+</span>
             </button>

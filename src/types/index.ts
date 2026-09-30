@@ -25,6 +25,7 @@ export interface UserProfile {
   is_admin?: boolean;
   isAdmin?: boolean;
   coins_balance: number;
+  coin_balance?: number;
   diamonds_balance: number;
   voice_rate: number;
   video_rate: number;
@@ -53,12 +54,20 @@ export interface UserProfile {
 
 export interface Transaction {
   id?: string;
-  user_id: string;
-  amount_inr: number;
-  coins_credited: number;
-  gateway_ref: string;
-  status: 'success' | 'failed' | 'pending';
-  created_at: any;
+  userId?: string;
+  user_id?: string;
+  coins?: number;
+  amount?: number;
+  amount_inr?: number;
+  coins_credited?: number;
+  utr?: string;
+  upi_id_used?: string;
+  gateway_ref?: string;
+  status: 'pending' | 'verified' | 'rejected' | 'success' | 'failed';
+  createdAt?: any;
+  created_at?: any;
+  verifiedAt?: any;
+  rejectedAt?: any;
 }
 
 export interface CallLog {

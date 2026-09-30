@@ -694,7 +694,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             <div>
               <span className="text-[11px] text-zinc-400 block font-medium">Coin Balance</span>
               <span className="text-lg font-black text-amber-300">
-                {currentUser?.coins_balance?.toLocaleString() ?? 0}
+                {(currentUser?.coins_balance ?? currentUser?.coin_balance ?? 0).toLocaleString()}
               </span>
             </div>
             <div className="w-7 h-7 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center">

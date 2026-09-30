@@ -55,14 +55,20 @@
       "description": "Coin recharge transaction record",
       "type": "object",
       "properties": {
+        "userId": { "type": "string" },
         "user_id": { "type": "string" },
+        "coins": { "type": "number" },
+        "amount": { "type": "number" },
         "amount_inr": { "type": "number" },
         "coins_credited": { "type": "number" },
+        "utr": { "type": "string" },
+        "upi_id_used": { "type": "string" },
         "gateway_ref": { "type": "string" },
-        "status": { "type": "string", "enum": ["pending", "success", "failed"] },
+        "status": { "type": "string", "enum": ["pending", "verified", "rejected", "success", "failed"] },
+        "createdAt": { "type": "string" },
         "created_at": { "type": "string" }
       },
-      "required": ["user_id", "amount_inr", "coins_credited", "status"]
+      "required": ["status"]
     },
     "Report": {
       "title": "Report",
@@ -156,6 +162,10 @@
     "/calls/{callId}": {
       "schema": "object",
       "description": "Real-time call invitations and signaling"
+    },
+    "/settings/{settingId}": {
+      "schema": "object",
+      "description": "System-wide settings such as UPI configuration"
     }
   }
 }

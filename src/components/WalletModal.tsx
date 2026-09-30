@@ -1,6 +1,8 @@
-import React from 'react';
-import { X, Coins, Sparkles } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Coins, Sparkles, ArrowRight, Zap, AlertTriangle, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { COIN_STORE_PLANS, CoinStorePlan, getAdminUpiId } from '../services/paymentService';
+import { ManualPaymentPopup } from './ManualPaymentPopup';
 
 export interface CoinPack {
   id: string;
@@ -80,9 +82,55 @@ interface WalletModalProps {
 
 export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
   const { currentUser } = useAuth();
+  const [selectedPlanForPayment, setSelectedPlanForPayment] = useState<CoinStorePlan | null>(null);
+  const [fetchedUpiId, setFetchedUpiId] = useState<string | null>(null);
+  const [isLoadingConfig, setIsLoadingConfig] = useState<boolean>(true);
+  const [configError, setConfigError] = useState<string | null>(null);
+
+  // On Coin Store / Wallet load, fetch UPI ID from Firestore: collection 'settings', doc 'payment_config', field 'upi_id'
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoadingConfig(true);
+    setConfigError(null);
+
+    getAdminUpiId()
+      .then((upi) => {
+        if (!isMounted) return;
+        if (!upi || !upi.trim()) {
+          setFetchedUpiId(null);
+          setConfigError('Payment config not found');
+        } else {
+          setFetchedUpiId(upi.trim());
+          setConfigError(null);
+        }
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        console.error('WalletModal: Error fetching UPI ID:', err);
+        setFetchedUpiId(null);
+        setConfigError('Payment config not found');
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoadingConfig(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const isBuyDisabled = isLoadingConfig || Boolean(configError) || !fetchedUpiId;
 
   const handleSelectPack = (pack: CoinPack | { coins: number; price: number; originalPrice?: number; discountText?: string }) => {
     console.log('selected pack:', pack);
+    if (isBuyDisabled) return;
+
+    setSelectedPlanForPayment({
+      coins: pack.coins,
+      amount: pack.price,
+    });
   };
 
   return (
@@ -101,8 +149,8 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
               <Coins className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="font-bold text-white text-base">Coin Wallet</h3>
-              <p className="text-[11px] text-zinc-400">Recharge coins for audio & video calls</p>
+              <h3 className="font-bold text-white text-base">Coin Store & Wallet</h3>
+              <p className="text-[11px] text-zinc-400">Manual UPI recharge for audio & video calls</p>
             </div>
           </div>
           <button
@@ -120,7 +168,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
             <span className="text-[11px] text-zinc-400 font-medium">Your Current Balance</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
               <span className="text-2xl sm:text-3xl font-black text-amber-300">
-                {currentUser?.coins_balance?.toLocaleString() ?? 0}
+                {(currentUser?.coins_balance ?? currentUser?.coin_balance ?? 0).toLocaleString()}
               </span>
               <span className="text-xs text-amber-400 font-bold">Coins</span>
             </div>
@@ -137,10 +185,115 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
           </div>
         </div>
 
+        {/* If Error: Show "Payment config not found" banner */}
+        {configError && !isLoadingConfig && (
+          <div className="my-3 p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 flex items-center gap-2.5 text-xs animate-in fade-in">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+            <div className="flex-1">
+              <span className="font-bold block">Payment config not found</span>
+              <span className="text-[11px] text-rose-300/80">
+                Buy buttons are disabled until the administrator configures the UPI ID in settings.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Section 1: FEATURED COIN STORE PLANS (Direct UPI Buy) */}
+        <div className="my-3.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+              <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
+              Instant UPI Coin Store Plans
+            </span>
+            <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+              GPay / PhonePe / Paytm
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
+            {COIN_STORE_PLANS.map((plan) => (
+              <div
+                key={plan.coins}
+                className={`relative rounded-2xl p-3 sm:p-3.5 border transition-all duration-200 flex flex-col justify-between ${
+                  plan.popular && !isBuyDisabled
+                    ? 'bg-gradient-to-b from-[#22182E] to-[#161220] border-[#FF69B4]/60 shadow-[0_0_15px_rgba(255,105,180,0.2)]'
+                    : 'bg-[#161622] border-[#29293C]'
+                }`}
+              >
+                {plan.popular && (
+                  <span className={`absolute -top-2.5 right-3 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
+                    isBuyDisabled
+                      ? 'bg-zinc-700 text-zinc-300'
+                      : 'bg-[#FF69B4] text-white shadow-[0_0_8px_#FF69B4]'
+                  }`}>
+                    Popular
+                  </span>
+                )}
+
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <div className="w-7 h-7 rounded-full bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-sm">
+                      🪙
+                    </div>
+                    <div>
+                      <div className="text-base sm:text-lg font-black text-white leading-tight">
+                        {plan.coins} Coins
+                      </div>
+                      <div className="text-[10px] text-zinc-400 font-medium">Quick recharge</div>
+                    </div>
+                  </div>
+
+                  <div className="my-1 py-1.5 px-2.5 rounded-xl bg-black/40 border border-white/5 flex items-baseline justify-between">
+                    <span className="text-[11px] text-zinc-400 font-medium">Price</span>
+                    <span className={`text-lg sm:text-xl font-black ${isBuyDisabled ? 'text-zinc-400' : 'text-emerald-400'}`}>
+                      ₹{plan.amount}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Buy Now Button - Disabled if payment config not found */}
+                <button
+                  type="button"
+                  disabled={isBuyDisabled}
+                  onClick={() => {
+                    if (!isBuyDisabled) {
+                      setSelectedPlanForPayment(plan);
+                    }
+                  }}
+                  title={configError || (isBuyDisabled ? 'Payment config not found' : 'Buy Now')}
+                  className={`w-full mt-2.5 py-2 rounded-xl font-bold text-xs transition flex items-center justify-center gap-1 shadow-md ${
+                    isBuyDisabled
+                      ? 'bg-zinc-800 text-zinc-500 border border-zinc-700/50 cursor-not-allowed opacity-60'
+                      : plan.popular
+                      ? 'bg-gradient-to-r from-[#FF69B4] to-pink-600 hover:opacity-95 text-white shadow-pink-500/20 cursor-pointer active:scale-95'
+                      : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/15 cursor-pointer active:scale-95'
+                  }`}
+                >
+                  {isLoadingConfig ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Checking...</span>
+                    </>
+                  ) : isBuyDisabled ? (
+                    <span>Payment config not found</span>
+                  ) : (
+                    <>
+                      <span>Buy Now</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </>
+                  )}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* Top Banner Offer */}
         <div
           onClick={() => handleSelectPack({ coins: 2500, price: 620, originalPrice: 1250, discountText: 'Flat ₹630 off' })}
-          className="my-3.5 relative overflow-hidden rounded-2xl p-3.5 sm:p-4 bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-600 text-white shadow-lg cursor-pointer hover:opacity-95 transition-all group"
+          className={`my-3.5 relative overflow-hidden rounded-2xl p-3.5 sm:p-4 bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-600 text-white shadow-lg transition-all group ${
+            isBuyDisabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer hover:opacity-95'
+          }`}
         >
           <div className="flex items-center justify-between">
             <div className="space-y-1">
@@ -164,7 +317,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
         {/* 3 Column Grid of Coin Packs */}
         <div className="space-y-2 mt-4">
           <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
-            Select Coin Pack
+            More Coin Packs
           </h4>
 
           <div className="grid grid-cols-3 gap-2.5 sm:gap-3 pt-1">
@@ -172,7 +325,11 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
               <div
                 key={pack.id}
                 onClick={() => handleSelectPack(pack)}
-                className="relative bg-[#161622] hover:bg-[#1C1C2A] border border-[#272738] hover:border-zinc-500 rounded-2xl p-2.5 sm:p-3 flex flex-col items-center justify-between text-center cursor-pointer transition-all duration-200 shadow-md group hover:shadow-xl"
+                className={`relative bg-[#161622] border rounded-2xl p-2.5 sm:p-3 flex flex-col items-center justify-between text-center transition-all duration-200 shadow-md group ${
+                  isBuyDisabled
+                    ? 'border-[#272738] opacity-60 cursor-not-allowed'
+                    : 'hover:bg-[#1C1C2A] border-[#272738] hover:border-zinc-500 cursor-pointer hover:shadow-xl'
+                }`}
               >
                 {/* Top Badge */}
                 {pack.badge && (
@@ -212,7 +369,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
                       {pack.discountText}
                     </span>
                   )}
-                  <span className="text-xs sm:text-sm font-black text-emerald-400 mt-0.5">
+                  <span className={`text-xs sm:text-sm font-black mt-0.5 ${isBuyDisabled ? 'text-zinc-400' : 'text-emerald-400'}`}>
                     ₹{pack.price}
                   </span>
                 </div>
@@ -237,6 +394,15 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
           </p>
         </div>
       </div>
+
+      {/* Manual Payment Popup Modal */}
+      {selectedPlanForPayment && fetchedUpiId && (
+        <ManualPaymentPopup
+          plan={selectedPlanForPayment}
+          initialUpiId={fetchedUpiId}
+          onClose={() => setSelectedPlanForPayment(null)}
+        />
+      )}
     </div>
   );
 };

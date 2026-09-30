@@ -23,7 +23,11 @@ import {
   Coins,
   Video,
   ExternalLink,
-  Crown
+  Crown,
+  Copy,
+  CreditCard,
+  Settings,
+  Loader2
 } from 'lucide-react';
 import { 
   collection, 
@@ -43,6 +47,13 @@ import { getUserAvatarUrl } from '../services/staticCdnService';
 import { isListenerOffline } from '../utils/presence';
 import { findCity } from '../utils/cities';
 import { getRandomListenerAvatar } from '../data/listenerAvatars';
+import { 
+  getAdminUpiId, 
+  updateAdminUpiId, 
+  getPendingTransactions, 
+  approveTransaction, 
+  rejectTransaction 
+} from '../services/paymentService';
 
 interface AdminDashboardProps {
   onClose: () => void;
@@ -89,7 +100,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
   const userEmail = currentUser?.email || auth.currentUser?.email;
   const isOwner = isMeetupOwner(userEmail);
 
-  const [activeTab, setActiveTab] = useState<'users' | 'listeners' | 'reports' | 'applications' | 'calls'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'listeners' | 'reports' | 'applications' | 'calls' | 'verify_payments' | 'settings'>('users');
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
   const [reportsList, setReportsList] = useState<Report[]>([]);
   const [applicationsList, setApplicationsList] = useState<ListenerApplication[]>([]);
@@ -97,6 +108,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
   const [totalRevenue, setTotalRevenue] = useState<number>(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
+
+  // Manual UPI Payments state
+  const [pendingTxList, setPendingTxList] = useState<Transaction[]>([]);
+  const [adminUpiInput, setAdminUpiInput] = useState<string>('');
+  const [adminUpiSaved, setAdminUpiSaved] = useState<boolean>(false);
+  const [isSavingUpi, setIsSavingUpi] = useState<boolean>(false);
+  const [verifyingTxId, setVerifyingTxId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Mask toggle state: maps user uid -> boolean (true if revealed)
   const [revealedPhones, setRevealedPhones] = useState<Record<string, boolean>>({});
@@ -140,11 +159,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
       let rev = 0;
       txSnap.forEach((d) => {
         const tx = d.data() as Transaction;
-        if (tx.status === 'success') {
-          rev += tx.amount_inr || 0;
+        if (tx.status === 'success' || tx.status === 'verified') {
+          rev += (tx.amount || tx.amount_inr || 0);
         }
       });
       setTotalRevenue(rev);
+
+      // 6. Fetch Pending Transactions for Verification
+      const pendingTxs = await getPendingTransactions();
+      setPendingTxList(pendingTxs);
+
+      // 7. Fetch current UPI ID for Settings (doc id: payment_config, field: upi_id)
+      try {
+        const currentUpi = await getAdminUpiId();
+        setAdminUpiInput(currentUpi);
+      } catch {
+        // Payment config not found yet in Firestore
+        setAdminUpiInput('');
+      }
     } catch (err) {
       console.error('Error fetching admin data:', err);
     } finally {
@@ -162,6 +194,76 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
       ...prev,
       [uid]: !prev[uid],
     }));
+  };
+
+  const copyToClipboard = (text: string, id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    navigator.clipboard.writeText(text).catch(() => {});
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // Payment Verification Handlers
+  const handleApprovePayment = async (tx: Transaction) => {
+    if (!tx.id) return;
+    const targetUserId = tx.userId || tx.user_id;
+    const coinsToAdd = tx.coins || tx.coins_credited || 0;
+    if (!targetUserId) {
+      alert('User ID is missing on this transaction.');
+      return;
+    }
+
+    setVerifyingTxId(tx.id);
+    try {
+      await approveTransaction(tx.id, targetUserId, coinsToAdd);
+      setPendingTxList((prev) => prev.filter((t) => t.id !== tx.id));
+      setUsersList((prev) =>
+        prev.map((u) => {
+          if (u.uid === targetUserId) {
+            const newCoins = (u.coins_balance || 0) + coinsToAdd;
+            return { ...u, coins_balance: newCoins, coin_balance: newCoins };
+          }
+          return u;
+        })
+      );
+      setTotalRevenue((prev) => prev + (tx.amount || tx.amount_inr || 0));
+      alert(`Payment Approved! Added ${coinsToAdd} coins to User: ${targetUserId}`);
+    } catch (err: any) {
+      console.error('Error approving payment:', err);
+      alert(`Failed to approve payment: ${err.message || 'Unknown error'}`);
+    } finally {
+      setVerifyingTxId(null);
+    }
+  };
+
+  const handleRejectPayment = async (tx: Transaction) => {
+    if (!tx.id) return;
+    if (!window.confirm(`Are you sure you want to reject payment for UTR: ${tx.utr || tx.id}?`)) return;
+
+    setVerifyingTxId(tx.id);
+    try {
+      await rejectTransaction(tx.id);
+      setPendingTxList((prev) => prev.filter((t) => t.id !== tx.id));
+      alert('Payment rejected.');
+    } catch (err: any) {
+      console.error('Error rejecting payment:', err);
+      alert(`Failed to reject payment: ${err.message || 'Unknown error'}`);
+    } finally {
+      setVerifyingTxId(null);
+    }
+  };
+
+  const handleSaveAdminUpi = async () => {
+    setIsSavingUpi(true);
+    try {
+      await updateAdminUpiId(adminUpiInput);
+      setAdminUpiSaved(true);
+      setTimeout(() => setAdminUpiSaved(false), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to update UPI ID');
+    } finally {
+      setIsSavingUpi(false);
+    }
   };
 
   const handleToggleBlock = async (user: UserProfile) => {
@@ -444,7 +546,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
           </div>
         )}
         {/* Metrics Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           <div className="p-3.5 bg-[#16161C] border border-[#23232C] rounded-2xl">
             <div className="flex items-center justify-between text-zinc-400 mb-1">
               <span className="text-[11px] font-medium">Total Users</span>
@@ -475,6 +577,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
               <PhoneCall className="w-4 h-4 text-[#FF69B4]" />
             </div>
             <span className="text-xl font-black text-[#FF69B4]">{callLogsList.length}</span>
+          </div>
+
+          <div 
+            onClick={() => setActiveTab('verify_payments')}
+            className="p-3.5 bg-[#16161C] border border-[#23232C] hover:border-emerald-500/50 rounded-2xl cursor-pointer transition col-span-2 sm:col-span-1"
+          >
+            <div className="flex items-center justify-between text-zinc-400 mb-1">
+              <span className="text-[11px] font-medium">Pending Verify</span>
+              <CreditCard className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-xl font-black text-emerald-400">{pendingTxList.length}</span>
+              <span className="text-[10px] text-zinc-500 font-semibold">to verify</span>
+            </div>
           </div>
         </div>
 
@@ -533,6 +649,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
             }`}
           >
             Call Logs ({callLogsList.length})
+          </button>
+
+          <button
+            onClick={() => setActiveTab('verify_payments')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'verify_payments'
+                ? 'bg-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.5)]'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            <span>Verify Payments</span>
+            {pendingTxList.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-400 text-black text-[10px] font-black animate-pulse">
+                {pendingTxList.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer flex items-center gap-1 ${
+              activeTab === 'settings'
+                ? 'bg-purple-600 text-white shadow-[0_0_10px_rgba(147,51,234,0.5)]'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            <Settings className="w-3.5 h-3.5" />
+            <span>UPI Settings</span>
           </button>
         </div>
 
@@ -874,6 +1018,224 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose, onOpenO
                 </div>
               ))
             )}
+          </div>
+        )}
+
+        {/* Tab 6: Verify Payments (Requirement 4) */}
+        {activeTab === 'verify_payments' && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-emerald-400" />
+                  <span>Pending Payment Verifications</span>
+                </h4>
+                <p className="text-[11px] text-zinc-400">
+                  Manual UPI payments submitted by users awaiting coin approval
+                </p>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
+                {pendingTxList.length} Pending
+              </span>
+            </div>
+
+            {pendingTxList.length === 0 ? (
+              <div className="py-12 text-center bg-[#16161C] border border-[#23232C] rounded-2xl p-6 text-zinc-400 text-xs space-y-2">
+                <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto opacity-70" />
+                <p className="font-semibold text-zinc-300">All caught up!</p>
+                <p className="text-zinc-500">No pending manual UPI transactions to verify.</p>
+              </div>
+            ) : (
+              <div className="bg-[#16161C] border border-[#23232C] rounded-2xl overflow-hidden shadow-xl">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-[#1D1D26] text-zinc-400 font-bold uppercase tracking-wider text-[10px] border-b border-[#2A2A36]">
+                        <th className="py-3 px-3.5">Date</th>
+                        <th className="py-3 px-3.5">User ID</th>
+                        <th className="py-3 px-3.5">Coins</th>
+                        <th className="py-3 px-3.5">Amount</th>
+                        <th className="py-3 px-3.5">UTR / Txn ID</th>
+                        <th className="py-3 px-3.5 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#23232E]">
+                      {pendingTxList.map((tx) => {
+                        const targetUid = tx.userId || tx.user_id || 'Unknown';
+                        const coins = tx.coins || tx.coins_credited || 0;
+                        const amount = tx.amount || tx.amount_inr || 0;
+                        const utr = tx.utr || 'N/A';
+                        const isActionBusy = verifyingTxId === tx.id;
+
+                        return (
+                          <tr key={tx.id} className="hover:bg-[#1C1C24] transition">
+                            {/* Date */}
+                            <td className="py-3 px-3.5 text-zinc-300 font-mono text-[11px] whitespace-nowrap">
+                              {formatJoinedDate(tx.createdAt || tx.created_at)}
+                            </td>
+
+                            {/* User ID with copy button */}
+                            <td className="py-3 px-3.5 whitespace-nowrap">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono text-xs text-zinc-300">
+                                  {targetUid.slice(0, 10)}...
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => copyToClipboard(targetUid, `uid-${tx.id}`, e)}
+                                  className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition"
+                                  title="Copy User ID"
+                                >
+                                  {copiedId === `uid-${tx.id}` ? (
+                                    <Check className="w-3 h-3 text-emerald-400" />
+                                  ) : (
+                                    <Copy className="w-3 h-3" />
+                                  )}
+                                </button>
+                              </div>
+                            </td>
+
+                            {/* Coins */}
+                            <td className="py-3 px-3.5 whitespace-nowrap">
+                              <span className="font-bold text-amber-300 inline-flex items-center gap-1">
+                                🪙 {coins} Coins
+                              </span>
+                            </td>
+
+                            {/* Amount */}
+                            <td className="py-3 px-3.5 whitespace-nowrap">
+                              <span className="font-black text-emerald-400">
+                                ₹{amount}
+                              </span>
+                            </td>
+
+                            {/* UTR with Copy Button */}
+                            <td className="py-3 px-3.5 whitespace-nowrap">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono font-bold text-white bg-black/40 px-2 py-0.5 rounded border border-zinc-700/60 select-all">
+                                  {utr}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => copyToClipboard(utr, `utr-${tx.id}`, e)}
+                                  className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition"
+                                  title="Copy UTR"
+                                >
+                                  {copiedId === `utr-${tx.id}` ? (
+                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                  ) : (
+                                    <Copy className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            </td>
+
+                            {/* Approve (green) & Reject (red) Buttons */}
+                            <td className="py-3 px-3.5 whitespace-nowrap text-center">
+                              <div className="flex items-center justify-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={isActionBusy}
+                                  onClick={() => handleApprovePayment(tx)}
+                                  className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-md shadow-emerald-900/30 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                >
+                                  {isActionBusy ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <Check className="w-3 h-3" />
+                                  )}
+                                  <span>Approve</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={isActionBusy}
+                                  onClick={() => handleRejectPayment(tx)}
+                                  className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition shadow-md shadow-rose-900/30 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                >
+                                  <X className="w-3 h-3" />
+                                  <span>Reject</span>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tab 7: Admin UPI Settings (Requirement 1) */}
+        {activeTab === 'settings' && (
+          <div className="space-y-4 max-w-xl mx-auto py-2">
+            <div className="bg-[#16161C] border border-[#23232C] rounded-2xl p-5 space-y-4 shadow-xl">
+              <div>
+                <h4 className="text-base font-bold text-white flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-purple-400" />
+                  <span>Manual UPI Payment Configuration</span>
+                </h4>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Set the GPay / UPI ID where app users send payment. Displayed in QR code and payment popup.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-zinc-300 block">
+                  Admin UPI ID (Stored in settings/payment_config)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={adminUpiInput}
+                    onChange={(e) => setAdminUpiInput(e.target.value)}
+                    placeholder="Enter UPI ID (e.g. yourname@bank)"
+                    className="flex-1 bg-[#0F0F14] border border-[#2A2A38] focus:border-purple-500 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm font-mono text-white placeholder-zinc-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={(e) => copyToClipboard(adminUpiInput, 'settings-upi', e)}
+                    className="p-2.5 rounded-xl bg-[#23232E] hover:bg-[#2A2A38] text-zinc-300 transition"
+                    title="Copy UPI ID"
+                  >
+                    {copiedId === 'settings-upi' ? (
+                      <Check className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+                <p className="text-[11px] text-zinc-500">
+                  Collection: <span className="font-mono text-zinc-400">settings</span> • Doc: <span className="font-mono text-zinc-400">payment_config</span> • Field: <span className="font-mono text-zinc-400">upi_id</span>
+                </p>
+              </div>
+
+              {adminUpiSaved && (
+                <div className="p-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2 animate-in fade-in">
+                  <CheckCircle className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>UPI ID saved successfully in Firestore settings!</span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                disabled={isSavingUpi || !adminUpiInput.trim()}
+                onClick={handleSaveAdminUpi}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:opacity-95 text-white font-bold text-xs sm:text-sm transition shadow-lg shadow-purple-600/25 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isSavingUpi ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Saving Settings...</span>
+                  </>
+                ) : (
+                  <span>Save UPI ID Settings</span>
+                )}
+              </button>
+            </div>
           </div>
         )}
       </div>
