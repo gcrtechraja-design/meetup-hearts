@@ -159,7 +159,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         setCurrentUser(data);
       } else {
-        setCurrentUser(null);
+        // Document does not exist in Firestore yet!
+        // If there is an active authenticated Firebase user, do NOT reset currentUser to null (prevents login redirect loop)
+        if (auth.currentUser && auth.currentUser.uid === uid) {
+          console.log('[AuthContext] User document not in Firestore yet for logged-in user:', uid);
+          const fbUser = auth.currentUser;
+          const fallbackEmail = fbUser.email || (fbUser.phoneNumber ? `${fbUser.phoneNumber.replace(/[^0-9]/g, '')}@meetup.user` : '');
+          const fallbackAdmin = isAdminEmail(fallbackEmail);
+          const fallbackProfile: UserProfile = {
+            uid: fbUser.uid,
+            name: fbUser.displayName || (fbUser.phoneNumber ? `User ${fbUser.phoneNumber.slice(-4)}` : fbUser.email?.split('@')[0] || (fallbackAdmin ? 'Admin' : 'Member')),
+            email: fallbackEmail,
+            phone_number: fbUser.phoneNumber || undefined,
+            age: 25,
+            gender: 'other',
+            location: 'Chennai, Tamil Nadu',
+            bio: fallbackAdmin ? 'Meet Up Platform Administrator' : 'Hey there! Exploring Meet Up.',
+            profile_pic: fbUser.photoURL || getDefaultFemaleAvatar(uid),
+            interests: fallbackAdmin ? ['Safety', 'Platform Operations'] : ['Music', 'Dating', 'Conversations'],
+            language: 'en',
+            role: fallbackAdmin ? 'admin' : 'user',
+            is_admin: fallbackAdmin,
+            isAdmin: fallbackAdmin,
+            coins_balance: fallbackAdmin ? 9999 : 50,
+            diamonds_balance: fallbackAdmin ? 500 : 0,
+            voice_rate: AUDIO_COIN_PER_MINUTE,
+            video_rate: VIDEO_COIN_PER_MINUTE,
+            status: 'online',
+            is_blocked: false,
+            isBlocked: false,
+            created_at: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+          };
+          setCurrentUser((prev) => prev || fallbackProfile);
+          setDoc(userDocRef, {
+            ...fallbackProfile,
+            created_at: serverTimestamp(),
+            createdAt: serverTimestamp(),
+          }, { merge: true }).catch((e) => console.error('[AuthContext] Error creating missing user doc in bindUserDoc:', e));
+        } else {
+          setCurrentUser(null);
+        }
       }
       setLoading(false);
     }, (err) => {
@@ -279,38 +319,52 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const userDocRef = doc(db, 'users', fUser.uid);
         const email = fUser.email?.trim().toLowerCase() || '';
         const isAdmin = isAdminEmail(email);
-        
-        // Ensure doc exists in Firestore
+        const fallbackEmail = fUser.email || (fUser.phoneNumber ? `${fUser.phoneNumber.replace(/[^0-9]/g, '')}@meetup.user` : '');
+
+        const optimisticProfile: UserProfile = {
+          uid: fUser.uid,
+          name: fUser.displayName || (fUser.phoneNumber ? `User ${fUser.phoneNumber.slice(-4)}` : fUser.email?.split('@')[0] || (isAdmin ? 'Admin' : 'Member')),
+          email: fallbackEmail,
+          phone_number: fUser.phoneNumber || undefined,
+          age: 25,
+          gender: 'other',
+          location: 'Chennai, Tamil Nadu',
+          bio: isAdmin ? 'Meet Up Platform Administrator' : 'Hey there! Exploring Meet Up.',
+          profile_pic: fUser.photoURL || getDefaultFemaleAvatar(fUser.uid),
+          interests: isAdmin ? ['Safety', 'Platform Operations', 'Moderation'] : ['Music', 'Dating', 'Conversations'],
+          language: 'en',
+          role: isAdmin ? 'admin' : 'user',
+          is_admin: isAdmin,
+          isAdmin: isAdmin,
+          coins_balance: isAdmin ? 9999 : 50,
+          diamonds_balance: isAdmin ? 500 : 0,
+          voice_rate: AUDIO_COIN_PER_MINUTE,
+          video_rate: VIDEO_COIN_PER_MINUTE,
+          status: 'online',
+          is_blocked: false,
+          isBlocked: false,
+          created_at: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        };
+
+        // Immediately set currentUser optimistically to break any login redirect loop
+        setCurrentUser((prev) => prev || optimisticProfile);
+        setLoading(false);
+
+        // Bind snapshot listener immediately
+        bindUserDoc(fUser.uid);
+
+        // Ensure doc exists in Firestore with full error reporting (never fail silently!)
         try {
           const snap = await getDoc(userDocRef);
           if (!snap.exists()) {
-            const fallbackEmail = fUser.email || (fUser.phoneNumber ? `${fUser.phoneNumber.replace(/[^0-9]/g, '')}@meetup.user` : '');
-            const newProfile: UserProfile = {
-              uid: fUser.uid,
-              name: fUser.displayName || (fUser.phoneNumber ? `User ${fUser.phoneNumber.slice(-4)}` : fUser.email?.split('@')[0] || (isAdmin ? 'Admin' : 'Member')),
-              email: fallbackEmail,
-              phone_number: fUser.phoneNumber || undefined,
-              age: 25,
-              gender: 'other',
-              location: 'Chennai, Tamil Nadu',
-              bio: isAdmin ? 'Meet Up Platform Administrator' : 'Hey there! Exploring Meet Up.',
-              profile_pic: fUser.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${fUser.uid}`,
-              interests: isAdmin ? ['Safety', 'Platform Operations', 'Moderation'] : ['Music', 'Dating', 'Conversations'],
-              language: 'en',
-              role: isAdmin ? 'admin' : 'user',
-              is_admin: isAdmin,
-              isAdmin: isAdmin,
-              coins_balance: isAdmin ? 9999 : 50,
-              diamonds_balance: isAdmin ? 500 : 0,
-              voice_rate: AUDIO_COIN_PER_MINUTE,
-              video_rate: VIDEO_COIN_PER_MINUTE,
-              status: 'online',
-              is_blocked: false,
-              isBlocked: false,
+            console.log('[AuthContext] Creating user document in Firestore for:', fUser.uid);
+            await setDoc(userDocRef, {
+              ...optimisticProfile,
               created_at: serverTimestamp(),
               createdAt: serverTimestamp(),
-            };
-            await setDoc(userDocRef, newProfile);
+            }, { merge: true });
+            console.log('[AuthContext] User document created in Firestore successfully');
           } else {
             const existingData = snap.data();
             if (isAdmin && (existingData.role !== 'admin' || !existingData.is_admin)) {
@@ -324,11 +378,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               await updateDoc(userDocRef, { phone_number: fUser.phoneNumber });
             }
           }
-        } catch (e) {
-          console.warn('Error reading/writing user doc on auth change:', e);
+        } catch (e: any) {
+          console.error('[AuthContext] CRITICAL: Firestore user doc sync error on auth change:', e);
         }
-
-        bindUserDoc(fUser.uid);
       } else {
         // If not in Firebase Auth, check if active local/Firestore session exists
         const localUid = localStorage.getItem('meetup_active_user_uid');

@@ -26,7 +26,7 @@ import { UserProfile, AUDIO_COIN_PER_MINUTE, VIDEO_COIN_PER_MINUTE } from './typ
 import { isMeetupOwner } from './utils/admin';
 
 const MainApp: React.FC = () => {
-  const { currentUser, loading } = useAuth();
+  const { currentUser, firebaseUser, loading } = useAuth();
   const { initiateCall, isInCall, joinCallById } = useCall();
 
   // Route path synchronization
@@ -83,11 +83,9 @@ const MainApp: React.FC = () => {
   }, []);
 
   // Authentication Guard:
-  // Check if user is logged in strictly via verified currentUser.
+  // Check if user is logged in via verified currentUser or active firebaseUser session.
   // If not logged in, redirect to Login page immediately.
-  // Do not allow access to Home, Matches, Chat, or any other page without login.
-  // Keep the user on Login page until they login with verified credentials.
-  const isUserLoggedIn = !!currentUser;
+  const isUserLoggedIn = !!currentUser || !!firebaseUser;
 
   useEffect(() => {
     if (loading) return;
@@ -210,6 +208,20 @@ const MainApp: React.FC = () => {
           setCurrentPath('/');
         }}
       />
+    );
+  }
+
+  // Show splash loading state while verifying Firebase Auth persistence
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#0a0a12] flex items-center justify-center text-white">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-[#ff4d8d] to-purple-600 flex items-center justify-center shadow-lg shadow-[#ff4d8d]/20 animate-pulse">
+            <span className="text-2xl select-none">❤️</span>
+          </div>
+          <p className="text-xs text-zinc-400 font-medium">Connecting to Meet Up...</p>
+        </div>
+      </div>
     );
   }
 

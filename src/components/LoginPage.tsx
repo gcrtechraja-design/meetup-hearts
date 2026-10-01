@@ -18,7 +18,7 @@ import {
   signInWithEmailAndPassword, 
   updateProfile 
 } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../firebase/config';
 import { getDefaultFemaleAvatar } from '../services/staticCdnService';
 import meetupLogo from '../assets/images/meetup_app_logo_1790184081929.jpg';
@@ -195,9 +195,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         }
       }
 
-      // Persist profile in Firestore database
+      // Persist profile in Firestore database (must not fail silently)
+      const userDocRef = doc(db, 'users', createdUser.uid);
       try {
-        const userDocRef = doc(db, 'users', createdUser.uid);
         await setDoc(userDocRef, {
           uid: createdUser.uid,
           name: name.trim(),
@@ -220,8 +220,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
           created_at: serverTimestamp(),
           createdAt: serverTimestamp(),
         }, { merge: true });
-      } catch (fsErr) {
-        console.warn('[LoginPage] Firestore setDoc notice:', fsErr);
+        console.log('[LoginPage] User document saved in Firestore successfully for:', createdUser.uid);
+      } catch (fsErr: any) {
+        console.error('[LoginPage] CRITICAL: Firestore user profile creation failed after signup:', fsErr);
+        throw new Error(`Account created in Authentication, but database profile initialization failed: ${fsErr?.message || fsErr}`);
       }
 
       // Step 3: ONLY redirect to login page AFTER Firebase confirms user creation succeeds
@@ -286,8 +288,32 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     try {
       // Attempt Firebase Authentication first
       try {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
-        console.log('[LoginPage] Firebase signInWithEmailAndPassword successful!');
+        const userCred = await signInWithEmailAndPassword(auth, email.trim(), password);
+        console.log('[LoginPage] Firebase signInWithEmailAndPassword successful for:', userCred.user.uid);
+
+        // Ensure user document exists in Firestore immediately before triggering redirect
+        const userDocRef = doc(db, 'users', userCred.user.uid);
+        try {
+          const snap = await getDoc(userDocRef);
+          if (!snap.exists()) {
+            console.log('[LoginPage] User document missing on login, provisioning immediately...');
+            await setDoc(userDocRef, {
+              uid: userCred.user.uid,
+              name: userCred.user.displayName || email.split('@')[0],
+              email: email.trim().toLowerCase(),
+              role: 'user',
+              coins_balance: 50,
+              diamonds_balance: 0,
+              status: 'online',
+              is_blocked: false,
+              created_at: serverTimestamp(),
+              createdAt: serverTimestamp(),
+            }, { merge: true });
+          }
+        } catch (fsErr) {
+          console.warn('[LoginPage] User doc verify notice on login:', fsErr);
+        }
+
         setInfoMsg('Login successful! Redirecting...');
         if (onLoginSuccess) {
           onLoginSuccess();

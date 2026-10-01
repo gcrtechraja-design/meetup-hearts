@@ -6,43 +6,46 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
     function isAdmin() {
       return isAuthenticated() && (
         request.auth.token.admin == true ||
         request.auth.token.email == 'rajasuvimarriage09@gmail.com' ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true ||
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'))
+        request.auth.token.email == 'gcrtech.raja@gmail.com' ||
+        request.auth.token.email == 'admin@meetup.com' ||
+        request.auth.token.email == 'mrraavana07@gmail.com'
       );
     }
 
     // 1. Users collection
-    // Allow user to read own balance and profile. Block client-side update of coin_balance / coins_balance.
+    // Allow public read for profile cards & listener discovery.
+    // Allow authenticated users to create and update their own user documents.
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
-      allow update: if isAuthenticated() && (
-        isAdmin() || 
-        (
-          request.auth.uid == userId && 
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['coin_balance', 'coins_balance', 'diamonds_balance', 'isAdmin', 'role', 'is_admin'])
-        )
-      );
+      allow read: if true;
+      allow create, update: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
       allow delete: if isAdmin();
+
+      // Subcollections under users (e.g. notifications, settings, etc.)
+      match /{subcollection=**} {
+        allow read, write: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      }
     }
 
     // 2. Transactions collection
     match /transactions/{txId} {
-      // allow create if request.auth.uid == request.resource.data.userId
-      allow create: if isAuthenticated() && request.auth.uid == request.resource.data.userId;
-
-      // allow read if request.auth.uid == resource.data.userId OR resource.data.user_id OR isAdmin()
-      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || request.auth.uid == resource.data.user_id || isAdmin());
-
-      // allow update only if isAdmin()
-      allow update: if isAdmin();
-
-      allow delete: if isAdmin();
+      allow create: if isAuthenticated() && (
+        request.auth.uid == request.resource.data.userId || 
+        request.auth.uid == request.resource.data.user_id
+      );
+      allow read: if isAuthenticated() && (
+        request.auth.uid == resource.data.userId || 
+        request.auth.uid == resource.data.user_id || 
+        isAdmin()
+      );
+      allow update, delete: if isAdmin();
     }
 
     // 3. Settings collection (e.g. UPI ID payment_config)
@@ -51,20 +54,27 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // 4. Other App Collections
+    // 4. Calls & In-Call Signaling / Messages Subcollections
+    match /calls/{callId} {
+      allow read, write: if isAuthenticated();
+
+      match /{subcollection=**} {
+        allow read, write: if isAuthenticated();
+      }
+    }
+
+    // 5. Call Logs
     match /call_logs/{logId} {
       allow read, write: if isAuthenticated();
     }
 
-    match /calls/{callId} {
-      allow read, write: if isAuthenticated();
-    }
-
+    // 6. Reports & Moderation
     match /reports/{reportId} {
       allow create: if isAuthenticated();
       allow read, update, delete: if isAdmin();
     }
 
+    // 7. Blocks & Blacklists
     match /blocks/{blockId} {
       allow read, write: if isAuthenticated();
     }
@@ -73,6 +83,7 @@ service cloud.firestore {
       allow read, write: if isAuthenticated();
     }
 
+    // 8. Favourites & Bookmarks
     match /user_favourites/{favId} {
       allow read, write: if isAuthenticated();
     }
@@ -81,6 +92,7 @@ service cloud.firestore {
       allow read, write: if isAuthenticated();
     }
 
+    // 9. Listener Applications
     match /listener_applications/{appId} {
       allow create, read: if isAuthenticated();
       allow update, delete: if isAdmin();

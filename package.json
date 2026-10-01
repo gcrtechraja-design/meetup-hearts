@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
+    "gcp-build": "vite build",
     "preview": "vite preview",
     "start": "node server.ts",
     "deploy:hosting": "firebase deploy --only hosting",

@@ -1,9 +1,9 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { getFirestore, initializeFirestore } from 'firebase/firestore';
 import rawConfig from '../../firebase-applet-config.json';
 
-// Read environment overrides if explicitly provided; otherwise default to rawConfig
+// Read environment overrides if explicitly provided; otherwise default to rawConfig (focused-balm-8vr20)
 const envProjectId = (typeof process !== 'undefined' && process.env?.VITE_FIREBASE_PROJECT_ID)
   || (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_PROJECT_ID);
 
@@ -22,8 +22,8 @@ if (inputProjectId?.startsWith('AIzaSy') && !inputApiKey?.startsWith('AIzaSy')) 
   inputApiKey = tempKey;
 }
 
-const projectId = inputProjectId;
-const apiKey = inputApiKey;
+export const projectId = inputProjectId;
+export const apiKey = inputApiKey;
 
 const envAuthDomain = (typeof process !== 'undefined' && process.env?.VITE_FIREBASE_AUTH_DOMAIN)
   || (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN);
@@ -68,10 +68,15 @@ try {
   console.warn('Could not set auth device language', e);
 }
 
-// Bind to target database ID (e.g. ai-studio-remixremixmeetup-0491e31b-8282-4c08-89d9-df41e4fe9a50)
-const targetDatabaseId = (projectId === rawConfig.projectId && rawConfig.firestoreDatabaseId && rawConfig.firestoreDatabaseId !== '(default)')
+// Ensure auth persistence is explicitly set to LOCAL so session survives redirects & page refreshes
+setPersistence(auth, browserLocalPersistence).catch((err) => {
+  console.warn('[Firebase Auth] setPersistence error:', err);
+});
+
+// Bind to target database ID (ai-studio-remixremixmeetup-0491e31b-8282-4c08-89d9-df41e4fe9a50)
+export const targetDatabaseId = rawConfig.firestoreDatabaseId && rawConfig.firestoreDatabaseId !== '(default)'
   ? rawConfig.firestoreDatabaseId
-  : undefined;
+  : 'ai-studio-remixremixmeetup-0491e31b-8282-4c08-89d9-df41e4fe9a50';
 
 // Initialize Firestore with experimentalAutoDetectLongPolling: true
 // This is critical for preventing [code=unavailable] "Could not reach Cloud Firestore backend" in sandboxed / proxy environments
