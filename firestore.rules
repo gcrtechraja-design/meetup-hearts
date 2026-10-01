@@ -36,8 +36,8 @@ service cloud.firestore {
       // allow create if request.auth.uid == request.resource.data.userId
       allow create: if isAuthenticated() && request.auth.uid == request.resource.data.userId;
 
-      // allow read if request.auth.uid == resource.data.userId OR isAdmin()
-      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
+      // allow read if request.auth.uid == resource.data.userId OR resource.data.user_id OR isAdmin()
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || request.auth.uid == resource.data.user_id || isAdmin());
 
       // allow update only if isAdmin()
       allow update: if isAdmin();

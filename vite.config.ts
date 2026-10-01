@@ -2,6 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig, loadEnv} from 'vite';
+import rawConfig from './firebase-applet-config.json';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -12,13 +13,13 @@ export default defineConfig(({mode}) => {
   const cleanUrl = rawUrl.trim().replace(/\/rest\/v1\/?$/i, '').replace(/\/auth\/v1\/?$/i, '').replace(/\/+$/, '');
   const cleanKey = rawKey.trim();
 
-  // Firebase Configuration - ensure all 6 values are injected into client
-  const firebaseApiKey = 'AIzaSyAy6jb-oJyGTZRPU_TWIDjaU-I9DkifteE';
-  const firebaseAuthDomain = 'meet-up-new.firebaseapp.com';
-  const firebaseProjectId = 'meet-up-new';
-  const firebaseStorageBucket = 'meet-up-new.firebasestorage.app';
-  const firebaseMessagingSenderId = '907800317253';
-  const firebaseAppId = '1:907800317253:web:1550307fe7efd776b5422c';
+  // Firebase Configuration - defaults from rawConfig or environment overrides
+  const firebaseApiKey = env.VITE_FIREBASE_API_KEY || rawConfig.apiKey;
+  const firebaseAuthDomain = env.VITE_FIREBASE_AUTH_DOMAIN || rawConfig.authDomain;
+  const firebaseProjectId = env.VITE_FIREBASE_PROJECT_ID || rawConfig.projectId;
+  const firebaseStorageBucket = env.VITE_FIREBASE_STORAGE_BUCKET || rawConfig.storageBucket;
+  const firebaseMessagingSenderId = env.VITE_FIREBASE_MESSAGING_SENDER_ID || rawConfig.messagingSenderId;
+  const firebaseAppId = env.VITE_FIREBASE_APP_ID || rawConfig.appId;
 
   return {
     define: {
