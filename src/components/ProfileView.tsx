@@ -31,11 +31,11 @@ import {
 import { FavoritesModal } from './FavoritesModal';
 import { AvatarPickerBottomSheet } from './AvatarPickerBottomSheet';
 import { BackgroundCallNotificationsModal } from './BackgroundCallNotificationsModal';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, stripUndefinedFields } from '../context/AuthContext';
 import { useTranslation, SupportedLanguage, LANGUAGES } from '../utils/i18n';
 import { getStaticCdnUrl, uploadImageToStaticCdn, getUserAvatarUrl, getDefaultFemaleAvatar } from '../services/staticCdnService';
 import { uploadPhotoToSupabase, syncUserToSupabase } from '../services/supabase';
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, updateDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { updateProfile } from 'firebase/auth';
 import { db, auth } from '../firebase/config';
 import { isListenerOffline } from '../utils/presence';
@@ -94,10 +94,113 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [savingName, setSavingName] = useState(false);
   const [isEditingCity, setIsEditingCity] = useState(false);
 
+  // Bio, Age, Gender & Interests Editing State
+  const [isEditingBio, setIsEditingBio] = useState(false);
+  const [bioInput, setBioInput] = useState('');
+  const [ageInput, setAgeInput] = useState<number>(24);
+  const [genderInput, setGenderInput] = useState<'male' | 'female' | 'other'>('other');
+  const [interestsInput, setInterestsInput] = useState<string[]>([]);
+  const [customInterest, setCustomInterest] = useState('');
+  const [savingDetails, setSavingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+
+  const POPULAR_INTERESTS = [
+    'Dating', 'Conversations', 'Music', 'Travel', 'Movies',
+    'Deep Talks', 'Fitness', 'Foodie', 'Art', 'Reading',
+    'Mindfulness', 'Gaming', 'Coffee', 'Photography'
+  ];
+
+  const handleStartEditDetails = () => {
+    setBioInput(currentUser?.bio || '');
+    setAgeInput(currentUser?.age || 24);
+    setGenderInput(currentUser?.gender || 'other');
+    setInterestsInput(currentUser?.interests && currentUser.interests.length > 0 ? currentUser.interests : ['Dating', 'Conversations']);
+    setDetailsError(null);
+    setIsEditingBio(true);
+  };
+
+  const handleToggleInterest = (interest: string) => {
+    setInterestsInput((prev) => 
+      prev.includes(interest) ? prev.filter((i) => i !== interest) : [...prev, interest]
+    );
+  };
+
+  const handleAddCustomInterest = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = customInterest.trim();
+    if (trimmed && !interestsInput.includes(trimmed)) {
+      setInterestsInput((prev) => [...prev, trimmed]);
+      setCustomInterest('');
+    }
+  };
+
+  const handleSaveDetails = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!currentUser) return;
+
+    if (ageInput < 18) {
+      setDetailsError('Age requirement: You must be at least 18 years old to use Meet Up.');
+      return;
+    }
+    if (ageInput > 99) {
+      setDetailsError('Please enter a valid age between 18 and 99.');
+      return;
+    }
+    if (!bioInput.trim()) {
+      setDetailsError('Bio cannot be empty.');
+      return;
+    }
+
+    setSavingDetails(true);
+    setDetailsError(null);
+    try {
+      await updateDoc(doc(db, 'users', currentUser.uid), stripUndefinedFields({
+        bio: bioInput.trim(),
+        age: Number(ageInput),
+        gender: genderInput,
+        interests: interestsInput.length > 0 ? interestsInput : ['Dating', 'Conversations'],
+      }));
+      setIsEditingBio(false);
+      setUploadNotice('Profile bio, age & interests updated successfully!');
+      setTimeout(() => setUploadNotice(null), 3000);
+    } catch (err: any) {
+      console.error('Failed to update profile details:', err);
+      setDetailsError(err.message || 'Failed to update profile details.');
+    } finally {
+      setSavingDetails(false);
+    }
+  };
+
   // Background Call Notifications Bottom Sheet & Toast State
   const [showNotificationModal, setShowNotificationModal] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const toastTimerRef = useRef<any>(null);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  const handleLogout = async (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      await logout();
+    } catch (err) {
+      console.error('[ProfileView] Logout error:', err);
+    } finally {
+      setIsLoggingOut(false);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('meetup_active_user_uid');
+        localStorage.removeItem('meetup_supabase_auth_token');
+        localStorage.removeItem('meetup_owner_authenticated');
+        sessionStorage.removeItem('meetup_owner_token');
+        window.history.replaceState({}, '', '/login');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+        window.location.href = '/login';
+      }
+    }
+  };
 
   const showToast = (text: string, type: 'success' | 'info' | 'error' = 'success') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -311,20 +414,36 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
   };
 
-  // Save selected avatar (e.g. from 100 Dicebear avatars) to Firestore user profile
+  // Save selected avatar (3D avatar or uploaded pic) to Firestore user profile
   const handleSaveAvatar = async (avatarUrl: string) => {
-    if (!currentUser) return;
+    if (!currentUser) {
+      setUploadNotice('Please login to update your avatar.');
+      return;
+    }
     setUploadingPic(true);
     setUploadNotice(null);
     try {
-      await updateDoc(doc(db, 'users', currentUser.uid), {
+      const userDocRef = doc(db, 'users', currentUser.uid);
+      await setDoc(userDocRef, {
         profile_pic: avatarUrl,
-      });
+        avatar_url: avatarUrl,
+        avatar: avatarUrl,
+        photoURL: avatarUrl,
+        updated_at: serverTimestamp(),
+      }, { merge: true });
+
+      if (auth.currentUser) {
+        try {
+          await updateProfile(auth.currentUser, { photoURL: avatarUrl });
+        } catch {}
+      }
+
       setUploadNotice('Avatar updated successfully!');
-      setTimeout(() => setUploadNotice(null), 3000);
+      setTimeout(() => setUploadNotice(null), 3500);
     } catch (err: any) {
-      console.error('Failed to update avatar in Firestore:', err);
-      alert(err.message || 'Failed to update avatar.');
+      console.error('[ProfileView] Failed to update avatar in Firestore:', err);
+      setUploadNotice(err?.message || 'Failed to update avatar.');
+      throw err;
     } finally {
       setUploadingPic(false);
     }
@@ -716,6 +835,188 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
       </div>
 
+      {/* Dating Profile Details Card (Bio, Age, Gender, Interests) */}
+      <div className="p-4 bg-[#16161C] border border-[#23232C] rounded-3xl relative overflow-hidden">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-white">About Me & Dating Profile</span>
+            <span className="px-2 py-0.5 rounded-full bg-[#FF69B4]/15 text-[#FF69B4] text-[10px] font-bold">
+              {currentUser?.age || 24} yrs • {currentUser?.gender ? currentUser.gender.toUpperCase() : 'OTHER'}
+            </span>
+          </div>
+          {!isEditingBio && (
+            <button
+              type="button"
+              onClick={handleStartEditDetails}
+              className="p-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-[#FF69B4] hover:text-white transition flex items-center gap-1 text-xs font-semibold cursor-pointer active:scale-95"
+              title="Edit Profile Details"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              <span>Edit</span>
+            </button>
+          )}
+        </div>
+
+        {isEditingBio ? (
+          <form onSubmit={handleSaveDetails} className="space-y-3.5 animate-in fade-in">
+            {detailsError && (
+              <div className="p-2.5 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{detailsError}</span>
+              </div>
+            )}
+
+            {/* Age & Gender Row */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="text-[11px] font-semibold text-zinc-400 block mb-1">
+                  Age <span className="text-zinc-500">(18+)</span>
+                </label>
+                <input
+                  type="number"
+                  min="18"
+                  max="99"
+                  value={ageInput}
+                  onChange={(e) => setAgeInput(Number(e.target.value))}
+                  className="w-full bg-[#0B0B0E] border border-zinc-700 focus:border-[#FF69B4] rounded-xl px-3 py-2 text-xs text-white outline-none font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-semibold text-zinc-400 block mb-1">Gender</label>
+                <select
+                  value={genderInput}
+                  onChange={(e) => setGenderInput(e.target.value as any)}
+                  className="w-full bg-[#0B0B0E] border border-zinc-700 focus:border-[#FF69B4] rounded-xl px-3 py-2 text-xs text-white outline-none font-bold cursor-pointer"
+                >
+                  <option value="female">Female</option>
+                  <option value="male">Male</option>
+                  <option value="other">Other / Non-Binary</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Bio Textarea */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Bio / About You</label>
+                <span className="text-[10px] text-zinc-500">{bioInput.length}/300</span>
+              </div>
+              <textarea
+                value={bioInput}
+                onChange={(e) => setBioInput(e.target.value.slice(0, 300))}
+                placeholder="Share a little bit about yourself, what you like talking about..."
+                rows={3}
+                className="w-full bg-[#0B0B0E] border border-zinc-700 focus:border-[#FF69B4] rounded-xl p-3 text-xs text-white outline-none resize-none placeholder-zinc-500"
+                required
+              />
+            </div>
+
+            {/* Interests Tag Selector */}
+            <div>
+              <label className="text-[11px] font-semibold text-zinc-400 block mb-1.5">
+                Interests & Passions
+              </label>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {POPULAR_INTERESTS.map((tag) => {
+                  const selected = interestsInput.includes(tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => handleToggleInterest(tag)}
+                      className={`px-2.5 py-1 rounded-xl text-[11px] font-medium transition cursor-pointer ${
+                        selected
+                          ? 'bg-[#FF69B4] text-white shadow-sm'
+                          : 'bg-[#0B0B0E] border border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {tag} {selected ? '✓' : '+'}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Add Custom Tag */}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={customInterest}
+                  onChange={(e) => setCustomInterest(e.target.value)}
+                  placeholder="Add custom interest..."
+                  className="flex-1 bg-[#0B0B0E] border border-zinc-800 rounded-xl px-3 py-1.5 text-xs text-white placeholder-zinc-500 outline-none"
+                  maxLength={25}
+                />
+                <button
+                  type="button"
+                  onClick={handleAddCustomInterest}
+                  className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-bold transition cursor-pointer"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setIsEditingBio(false)}
+                disabled={savingDetails}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={savingDetails}
+                className="px-4 py-2 rounded-xl bg-[#FF69B4] hover:bg-pink-600 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md disabled:opacity-60"
+              >
+                {savingDetails ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saving...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Save Profile</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="space-y-3">
+            {/* Bio Display */}
+            <p className="text-xs text-zinc-300 leading-relaxed italic bg-[#0B0B0E] p-3 rounded-2xl border border-zinc-800/60">
+              "{currentUser?.bio || 'Hey there! Exploring Meet Up.'}"
+            </p>
+
+            {/* Interests Chips Display */}
+            <div>
+              <span className="text-[10px] uppercase tracking-wider font-bold text-zinc-400 block mb-1.5">
+                Interests
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {(currentUser?.interests && currentUser.interests.length > 0
+                  ? currentUser.interests
+                  : ['Dating', 'Conversations', 'Music']
+                ).map((tag, idx) => (
+                  <span
+                    key={idx}
+                    className="px-2.5 py-1 rounded-xl bg-[#0B0B0E] border border-zinc-800/90 text-zinc-300 text-[11px] font-medium"
+                  >
+                    #{tag}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Profile Menu Actions */}
       <div className="bg-[#16161C] border border-[#23232C] rounded-3xl divide-y divide-zinc-800/70 overflow-hidden">
         {/* Wallet */}
@@ -948,11 +1249,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       {/* Danger Zone & Logout */}
       <div className="space-y-2 pt-2">
         <button
-          onClick={logout}
-          className="w-full p-3.5 rounded-2xl bg-[#16161C] hover:bg-[#202028] border border-[#23232C] text-zinc-300 font-bold text-xs flex items-center justify-center gap-2 transition"
+          type="button"
+          onClick={handleLogout}
+          disabled={isLoggingOut}
+          className="w-full p-3.5 rounded-2xl bg-[#16161C] hover:bg-[#202028] border border-[#23232C] text-zinc-300 hover:text-white font-bold text-xs flex items-center justify-center gap-2 transition disabled:opacity-50 cursor-pointer active:scale-98"
         >
-          <LogOut className="w-4 h-4" />
-          {t('logout')}
+          <LogOut className={`w-4 h-4 ${isLoggingOut ? 'animate-spin' : ''}`} />
+          {isLoggingOut ? 'Logging out...' : t('logout')}
         </button>
 
         <button

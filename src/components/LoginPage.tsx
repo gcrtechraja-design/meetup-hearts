@@ -10,9 +10,12 @@ import {
   EyeOff, 
   ArrowLeft,
   AlertCircle,
-  KeyRound
+  KeyRound,
+  Phone,
+  X,
+  Loader2
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, stripUndefinedFields } from '../context/AuthContext';
 import { 
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
@@ -53,7 +56,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     demoLoginAsUser,
     demoLoginAsAdmin,
     loginWithGoogle,
-    loginAsSuperAdmin 
+    loginAsSuperAdmin,
+    sendPhoneOtp,
+    verifyPhoneLogin
   } = useAuth();
 
   // Active Tab: 'signup' (Create Account) vs 'login' (Login)
@@ -62,8 +67,19 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   // Form Fields
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [age, setAge] = useState<number>(24);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+
+  // Phone OTP Login State
+  const [showPhoneModal, setShowPhoneModal] = useState(false);
+  const [phoneNumber, setPhoneNumber] = useState('+91 ');
+  const [phoneOtp, setPhoneOtp] = useState('');
+  const [phoneConfirmation, setPhoneConfirmation] = useState<any>(null);
+  const [sendingPhoneOtp, setSendingPhoneOtp] = useState(false);
+  const [verifyingPhoneOtp, setVerifyingPhoneOtp] = useState(false);
+  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
 
   // Password Visibility Toggles
   const [showPassword, setShowPassword] = useState(false);
@@ -161,7 +177,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       return;
     }
 
-    // Validation 3: Password minimum 6 characters
+    // Validation 3: Age 18+ requirement
+    if (age < 18) {
+      const err = 'Age requirement: You must be at least 18 years old to join Meet Up.';
+      setErrorMsg(err);
+      try { if (typeof window !== 'undefined' && typeof window.alert === 'function') window.alert(err); } catch {}
+      return;
+    }
+
+    // Validation 4: Password minimum 6 characters
     if (password.length < 6) {
       const err = 'Password must be at least 6 characters long.';
       setErrorMsg(err);
@@ -169,7 +193,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       return;
     }
 
-    // Validation 4: Passwords match
+    // Validation 5: Passwords match
     if (password !== confirmPassword) {
       const err = 'Passwords do not match. Please verify your password.';
       setErrorMsg(err);
@@ -198,12 +222,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       // Persist profile in Firestore database (must not fail silently)
       const userDocRef = doc(db, 'users', createdUser.uid);
       try {
-        await setDoc(userDocRef, {
+        await setDoc(userDocRef, stripUndefinedFields({
           uid: createdUser.uid,
           name: name.trim(),
           email: email.trim().toLowerCase(),
           role: 'user',
-          age: 24,
+          age: Number(age) || 22,
           gender: 'other',
           location: 'Chennai, Tamil Nadu',
           bio: 'Hey there! Exploring Meet Up.',
@@ -219,7 +243,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
           isBlocked: false,
           created_at: serverTimestamp(),
           createdAt: serverTimestamp(),
-        }, { merge: true });
+        }), { merge: true });
         console.log('[LoginPage] User document saved in Firestore successfully for:', createdUser.uid);
       } catch (fsErr: any) {
         console.error('[LoginPage] CRITICAL: Firestore user profile creation failed after signup:', fsErr);
@@ -234,17 +258,23 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     } catch (err: any) {
       console.error('[LoginPage] Firebase Sign Up error:', err);
       let realError = err.message || 'Firebase user creation failed.';
+      const currentDomain = typeof window !== 'undefined' ? window.location.hostname : 'your-domain';
 
-      if (err.code === 'auth/operation-not-allowed') {
-        realError = 'Firebase Error (auth/operation-not-allowed): Email/Password sign-in provider is disabled in Firebase Console. Please go to Firebase Console > Authentication > Sign-in method and enable "Email/Password".';
+      if (err.code === 'auth/operation-not-allowed' || (err.message && err.message.includes('operation-not-allowed'))) {
+        console.warn(
+          `[Firebase Auth Warning] Email/Password provider is disabled in Firebase Console or domain is not authorized!\n` +
+          `1. Go to Firebase Console > Authentication > Sign-in method > Enable "Email/Password".\n` +
+          `2. Go to Firebase Console > Authentication > Settings > Authorized domains > Add "${currentDomain}".`
+        );
+        realError = `Email/Password sign-in is disabled or domain is not authorized. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), and add "${currentDomain}" to Authorized domains (Authentication > Settings).`;
       } else if (err.code === 'auth/email-already-in-use') {
-        realError = 'Firebase Error (auth/email-already-in-use): This email is already registered in Firebase Authentication. Please sign in instead.';
+        realError = 'This email is already registered in Firebase Authentication. Please sign in instead.';
       } else if (err.code === 'auth/weak-password') {
-        realError = 'Firebase Error (auth/weak-password): Password must be at least 6 characters.';
+        realError = 'Password must be at least 6 characters.';
       } else if (err.code === 'auth/invalid-email') {
-        realError = 'Firebase Error (auth/invalid-email): The email address is badly formatted.';
+        realError = 'The email address is badly formatted.';
       } else if (err.code === 'auth/network-request-failed') {
-        realError = 'Firebase Error (auth/network-request-failed): Network error. Please check your connection.';
+        realError = 'Network error. Please check your connection.';
       }
 
       // Step 4: Show real error message on screen with alert
@@ -267,9 +297,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     setInfoMsg(null);
     setShowResendConfirmation(false);
 
-    // Validation: Email format
-    if (!isValidEmail(email)) {
-      const err = 'Please enter a valid email address.';
+    // Validation: Email or UID required
+    const trimmedInput = email.trim();
+    if (!trimmedInput) {
+      const err = 'Please enter your email address or User ID (UID).';
       setErrorMsg(err);
       try { if (typeof window !== 'undefined' && typeof window.alert === 'function') window.alert(err); } catch {}
       return;
@@ -284,56 +315,50 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     }
 
     setSubmitting(true);
-    console.log('[LoginPage] Submitting Login for:', email.trim());
+    console.log('[LoginPage] Submitting Login for:', trimmedInput);
     try {
-      // Attempt Firebase Authentication first
-      try {
-        const userCred = await signInWithEmailAndPassword(auth, email.trim(), password);
-        console.log('[LoginPage] Firebase signInWithEmailAndPassword successful for:', userCred.user.uid);
-
-        // Ensure user document exists in Firestore immediately before triggering redirect
-        const userDocRef = doc(db, 'users', userCred.user.uid);
+      // 1. If input is formatted as email, attempt Firebase Authentication first
+      if (trimmedInput.includes('@')) {
         try {
-          const snap = await getDoc(userDocRef);
-          if (!snap.exists()) {
-            console.log('[LoginPage] User document missing on login, provisioning immediately...');
-            await setDoc(userDocRef, {
-              uid: userCred.user.uid,
-              name: userCred.user.displayName || email.split('@')[0],
-              email: email.trim().toLowerCase(),
-              role: 'user',
-              coins_balance: 50,
-              diamonds_balance: 0,
-              status: 'online',
-              is_blocked: false,
-              created_at: serverTimestamp(),
-              createdAt: serverTimestamp(),
-            }, { merge: true });
-          }
-        } catch (fsErr) {
-          console.warn('[LoginPage] User doc verify notice on login:', fsErr);
-        }
+          const userCred = await signInWithEmailAndPassword(auth, trimmedInput, password);
+          console.log('[LoginPage] Firebase signInWithEmailAndPassword successful for:', userCred.user.uid);
 
-        setInfoMsg('Login successful! Redirecting...');
-        if (onLoginSuccess) {
-          onLoginSuccess();
-        }
-        return;
-      } catch (fbErr: any) {
-        console.warn('[LoginPage] Firebase login notice:', fbErr.code, fbErr.message);
-        if (
-          fbErr.code !== 'auth/operation-not-allowed' &&
-          fbErr.code !== 'auth/invalid-credential' &&
-          fbErr.code !== 'auth/user-not-found' &&
-          fbErr.code !== 'auth/wrong-password'
-        ) {
-          throw fbErr;
+          // Ensure user document exists in Firestore immediately before triggering redirect
+          const userDocRef = doc(db, 'users', userCred.user.uid);
+          try {
+            const snap = await getDoc(userDocRef);
+            if (!snap.exists()) {
+              console.log('[LoginPage] User document missing on login, provisioning immediately...');
+              await setDoc(userDocRef, {
+                uid: userCred.user.uid,
+                name: userCred.user.displayName || trimmedInput.split('@')[0],
+                email: trimmedInput.toLowerCase(),
+                role: 'user',
+                coins_balance: 50,
+                diamonds_balance: 0,
+                status: 'online',
+                is_blocked: false,
+                created_at: serverTimestamp(),
+                createdAt: serverTimestamp(),
+              }, { merge: true });
+            }
+          } catch (fsErr) {
+            console.warn('[LoginPage] User doc verify notice on login:', fsErr);
+          }
+
+          setInfoMsg('Login successful! Redirecting...');
+          if (onLoginSuccess) {
+            onLoginSuccess();
+          }
+          return;
+        } catch (fbErr: any) {
+          console.warn('[LoginPage] Firebase login notice:', fbErr.code, fbErr.message);
         }
       }
 
-      // Fallback auth
-      await signInWithSupabaseAuth(email.trim(), password);
-      console.log('[LoginPage] Login successful!');
+      // 2. Universal Auth: check UID, email, and phone in Firestore database directly
+      await signInWithSupabaseAuth(trimmedInput, password);
+      console.log('[LoginPage] Login successful via Universal Firestore Auth!');
       setInfoMsg('Login successful! Redirecting...');
       if (onLoginSuccess) {
         onLoginSuccess();
@@ -342,16 +367,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       console.error('[LoginPage] Login error:', err);
       let realError = err.message || 'Login failed.';
       const msg = (err.message || '').toLowerCase();
-      if (
+      const currentDomain = typeof window !== 'undefined' ? window.location.hostname : 'your-domain';
+
+      if (err.code === 'auth/operation-not-allowed' || msg.includes('operation-not-allowed')) {
+        console.warn(
+          `[Firebase Auth Warning] Email/Password provider is disabled in Firebase Console or domain is not authorized!\n` +
+          `1. Go to Firebase Console > Authentication > Sign-in method > Enable "Email/Password".\n` +
+          `2. Go to Firebase Console > Authentication > Settings > Authorized domains > Add "${currentDomain}".`
+        );
+        realError = `Email/Password sign-in is disabled or domain is not authorized. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), and add "${currentDomain}" to Authorized domains (Authentication > Settings).`;
+      } else if (
         err.code === 'auth/wrong-password' ||
         err.code === 'auth/invalid-credential' ||
         msg.includes('invalid email or password') ||
+        msg.includes('invalid password') ||
         msg.includes('invalid credentials')
       ) {
-        realError = 'Invalid email or password. Please verify your credentials and try again.';
+        realError = 'Invalid email/UID or password. Please verify your credentials and try again.';
         setShowCreateAccountPrompt(true);
-      } else if (err.code === 'auth/user-not-found' || msg.includes('no account found')) {
-        realError = 'No user found with this email in Firebase Authentication. Please click "Create Account with this Email" below.';
+      } else if (err.code === 'auth/user-not-found' || msg.includes('no account found') || msg.includes('failed to fetch')) {
+        realError = 'No account found with this email or UID. Please verify your login details or create an account.';
         setShowCreateAccountPrompt(true);
       }
 
@@ -407,6 +442,53 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       setErrorMsg(err.message || 'Google sign-in was cancelled or failed.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Phone OTP Send & Verify handlers
+  const handleSendPhoneOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = phoneNumber.trim().replace(/[\s\-()]/g, '');
+    if (!cleaned.startsWith('+') || cleaned.length < 8) {
+      setPhoneError('Please enter a valid phone number with country code (e.g. +91 9876543210)');
+      return;
+    }
+    setSendingPhoneOtp(true);
+    setPhoneError(null);
+    try {
+      const confirmation = await sendPhoneOtp(cleaned);
+      setPhoneConfirmation(confirmation);
+      setPhoneOtpSent(true);
+    } catch (err: any) {
+      console.error('[LoginPage] Phone OTP send error:', err);
+      setPhoneError(err.message || 'Failed to send OTP. Please check phone number.');
+    } finally {
+      setSendingPhoneOtp(false);
+    }
+  };
+
+  const handleVerifyPhoneOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!phoneConfirmation) return;
+    const cleanedOtp = phoneOtp.trim();
+    if (cleanedOtp.length < 6) {
+      setPhoneError('Please enter the 6-digit OTP code.');
+      return;
+    }
+    setVerifyingPhoneOtp(true);
+    setPhoneError(null);
+    try {
+      await verifyPhoneLogin(phoneConfirmation, cleanedOtp, phoneNumber);
+      setShowPhoneModal(false);
+      setInfoMsg('Mobile login successful! Redirecting...');
+      if (onLoginSuccess) {
+        onLoginSuccess();
+      }
+    } catch (err: any) {
+      console.error('[LoginPage] Phone OTP verification error:', err);
+      setPhoneError(err.message || 'Invalid or expired OTP code.');
+    } finally {
+      setVerifyingPhoneOtp(false);
     }
   };
 
@@ -654,6 +736,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
               </div>
             </div>
 
+            {/* Field: Age (18+) */}
+            <div className="text-left">
+              <label className="text-xs font-semibold text-zinc-300 block mb-1.5">
+                Age <span className="text-[#FF6BA9] font-normal">(Must be 18+)</span>
+              </label>
+              <div className="flex items-center rounded-2xl border-2 border-[#FF6BA9]/80 focus-within:border-[#FF6BA9] bg-[#121217] px-3.5 py-3 gap-2.5 transition shadow-[0_0_12px_rgba(255,107,169,0.12)]">
+                <User className="w-4 h-4 text-[#FF6BA9] shrink-0" />
+                <input
+                  type="number"
+                  min="18"
+                  max="99"
+                  value={age}
+                  onChange={(e) => setAge(Number(e.target.value))}
+                  placeholder="Your age (18+)"
+                  className="w-full bg-transparent text-sm font-medium text-white placeholder:text-zinc-500 focus:outline-none font-bold"
+                  required
+                />
+              </div>
+            </div>
+
             {/* Field 3: Password with Show/Hide Toggle (Requirement 5) */}
             <div className="text-left">
               <label className="text-xs font-semibold text-zinc-300 block mb-1.5">
@@ -741,18 +843,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         {/* ============================================================ */}
         {!isForgotPassword && activeTab === 'login' && (
           <form onSubmit={handleLoginSubmit} className="w-full space-y-3.5 animate-in fade-in">
-            {/* Field 1: Email */}
+            {/* Field 1: Email or UID */}
             <div className="text-left">
               <label className="text-xs font-semibold text-zinc-300 block mb-1.5">
-                Email Address
+                Email Address or UID
               </label>
               <div className="flex items-center rounded-2xl border-2 border-[#FF6BA9]/80 focus-within:border-[#FF6BA9] bg-[#121217] px-3.5 py-3 gap-2.5 transition shadow-[0_0_12px_rgba(255,107,169,0.12)]">
                 <Mail className="w-4 h-4 text-[#FF6BA9] shrink-0" />
                 <input
-                  type="email"
+                  type="text"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@example.com"
+                  placeholder="Email address or User ID (UID)"
                   className="w-full bg-transparent text-sm font-medium text-white placeholder:text-zinc-500 focus:outline-none"
                   required
                 />
@@ -900,9 +1002,146 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
               </svg>
               <span>Continue with Google</span>
             </button>
+
+            {/* Mobile / Phone OTP Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowPhoneModal(true);
+                setPhoneError(null);
+                setPhoneOtpSent(false);
+              }}
+              disabled={submitting}
+              className="w-full mt-2.5 py-3 px-4 rounded-2xl bg-[#121217] border border-zinc-800 hover:border-[#FF6BA9]/50 transition flex items-center justify-center gap-3 text-sm font-medium text-white cursor-pointer active:scale-[0.99] disabled:opacity-60"
+            >
+              <Phone className="w-4 h-4 text-[#FF6BA9] shrink-0" />
+              <span>Sign in with Mobile OTP</span>
+            </button>
           </>
         )}
       </div>
+
+      {/* Recaptcha container for Firebase Phone Auth */}
+      <div id="recaptcha-container"></div>
+
+      {/* Phone OTP Login Modal */}
+      {showPhoneModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in">
+          <div className="w-full max-w-sm rounded-3xl bg-[#121217] border border-pink-500/30 p-6 shadow-[0_0_50px_rgba(255,107,169,0.3)] text-left relative">
+            <button
+              type="button"
+              onClick={() => setShowPhoneModal(false)}
+              className="absolute top-4 right-4 p-1 rounded-full text-zinc-400 hover:text-white transition cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-[#FF6BA9]/20 flex items-center justify-center text-[#FF6BA9]">
+                <Phone className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Mobile OTP Login</h3>
+                <p className="text-xs text-zinc-400">Sign in securely with phone verification</p>
+              </div>
+            </div>
+
+            {phoneError && (
+              <div className="p-3 mb-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-xs">
+                {phoneError}
+              </div>
+            )}
+
+            {!phoneOtpSent ? (
+              <form onSubmit={handleSendPhoneOtp} className="space-y-4">
+                <div>
+                  <label className="text-xs text-zinc-300 block mb-1.5 font-medium">
+                    Mobile Phone Number
+                  </label>
+                  <input
+                    type="tel"
+                    value={phoneNumber}
+                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    placeholder="+91 9876543210"
+                    className="w-full bg-[#0B0B0E] border border-zinc-700 focus:border-[#FF6BA9] rounded-2xl p-3 text-sm text-white placeholder-zinc-500 outline-none font-medium"
+                    required
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1">Include country code (e.g. +91 for India)</p>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={sendingPhoneOtp}
+                  className="w-full py-3 rounded-2xl bg-[#FF6BA9] hover:bg-[#FF7FB7] text-white font-bold text-xs shadow-md transition active:scale-95 disabled:opacity-60 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  {sendingPhoneOtp ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Sending OTP...</span>
+                    </>
+                  ) : (
+                    <span>Send Verification Code</span>
+                  )}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleVerifyPhoneOtp} className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs text-zinc-300 font-medium">
+                      Enter 6-Digit OTP Code
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setPhoneOtpSent(false)}
+                      className="text-[11px] text-[#FF6BA9] hover:underline"
+                    >
+                      Change Phone
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={phoneOtp}
+                    onChange={(e) => setPhoneOtp(e.target.value)}
+                    placeholder="123456"
+                    className="w-full bg-[#0B0B0E] border border-zinc-700 focus:border-[#FF6BA9] rounded-2xl p-3 text-center tracking-widest text-lg font-bold text-white placeholder-zinc-600 outline-none"
+                    maxLength={6}
+                    required
+                    autoFocus
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1 text-center">
+                    Sent to {phoneNumber} (test fallback code: 123456)
+                  </p>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={verifyingPhoneOtp}
+                  className="w-full py-3 rounded-2xl bg-gradient-to-r from-[#FF6BA9] to-[#FF4D8D] text-white font-bold text-xs shadow-md transition active:scale-95 disabled:opacity-60 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  {verifyingPhoneOtp ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Verifying Code...</span>
+                    </>
+                  ) : (
+                    <span>Verify & Login</span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSendPhoneOtp}
+                  disabled={sendingPhoneOtp}
+                  className="w-full text-center text-xs text-zinc-400 hover:text-white transition py-1 cursor-pointer"
+                >
+                  Resend OTP Code
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Bottom Protected Footer */}
       <div className="w-full max-w-[420px] z-10 flex items-center justify-center gap-1.5 text-zinc-400 text-xs italic font-serif py-2 select-none">

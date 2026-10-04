@@ -42,11 +42,13 @@ export const AvatarPickerBottomSheet: React.FC<AvatarPickerBottomSheetProps> = (
   const [saving, setSaving] = useState<boolean>(false);
   const [selectedGender, setSelectedGender] = useState<'all' | 'female' | 'male'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [errorToast, setErrorToast] = useState<string | null>(null);
 
   // Extract initial avatar from current URL if applicable
   useEffect(() => {
     if (isOpen) {
       setViewMode(initialView);
+      setErrorToast(null);
       if (currentAvatarUrl) {
         const found = LISTENER_AVATARS.find((a) => a.url === currentAvatarUrl || currentAvatarUrl.includes(`avatar_${a.id}`));
         if (found) {
@@ -73,11 +75,13 @@ export const AvatarPickerBottomSheet: React.FC<AvatarPickerBottomSheetProps> = (
   const handleConfirmSave = async () => {
     if (!selectedAvatar?.url) return;
     setSaving(true);
+    setErrorToast(null);
     try {
       await onSaveAvatar(selectedAvatar.url);
       onClose();
-    } catch (err) {
-      console.error('Failed to save avatar:', err);
+    } catch (err: any) {
+      console.error('[AvatarPicker] Failed to save avatar:', err);
+      setErrorToast(err?.message || 'Failed to save avatar. Please try again.');
     } finally {
       setSaving(false);
     }
@@ -245,6 +249,19 @@ export const AvatarPickerBottomSheet: React.FC<AvatarPickerBottomSheetProps> = (
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {errorToast && (
+              <div className="mx-4 my-2 p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between shrink-0 animate-in fade-in">
+                <span>{errorToast}</span>
+                <button 
+                  type="button" 
+                  onClick={() => setErrorToast(null)} 
+                  className="p-1 hover:text-white text-zinc-400"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
 
             {/* Selected Avatar Preview Bar */}
             <div className="p-3.5 px-5 bg-[#0B0B0E] border-b border-zinc-800/80 flex items-center justify-between shrink-0">

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Clock, Heart, Phone, Video, Coins, ArrowUpRight, ArrowDownLeft, Calendar } from 'lucide-react';
+import { Clock, Heart, Phone, Video, Coins, ArrowUpRight, ArrowDownLeft, Calendar, MessageCircle } from 'lucide-react';
 import { collection, query, where, getDocs, orderBy, doc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { useAuth } from '../context/AuthContext';
@@ -11,12 +11,14 @@ interface RecentsViewProps {
   onVoiceCall: (user: UserProfile) => void;
   onVideoCall: (user: UserProfile) => void;
   onOpenProfile: (user: UserProfile) => void;
+  onOpenChat?: (user: UserProfile) => void;
 }
 
 export const RecentsView: React.FC<RecentsViewProps> = ({
   onVoiceCall,
   onVideoCall,
   onOpenProfile,
+  onOpenChat,
 }) => {
   const { currentUser } = useAuth();
   const lang = (currentUser?.language?.toUpperCase() || 'EN') as SupportedLanguage;
@@ -60,12 +62,18 @@ export const RecentsView: React.FC<RecentsViewProps> = ({
         });
         setCallLogs(allLogs);
 
-        // 2. Fetch Bookmarks
-        const bookmarksRef = collection(db, 'bookmarks');
-        const bq = query(bookmarksRef, where('user_id', '==', currentUser.uid));
-        const bookmarkSnap = await getDocs(bq);
+        // 2. Fetch Favourites from user_favourites (and bookmarks)
+        const favsRef = collection(db, 'user_favourites');
+        const fq = query(favsRef, where('user_id', '==', currentUser.uid));
+        const [favSnap, bookmarkSnap] = await Promise.all([
+          getDocs(fq),
+          getDocs(query(collection(db, 'bookmarks'), where('user_id', '==', currentUser.uid))).catch(() => ({ docs: [] } as any)),
+        ]);
 
-        const favIds = bookmarkSnap.docs.map((d) => d.data().favorited_user_id);
+        const favIds = Array.from(new Set([
+          ...favSnap.docs.map((d: any) => d.data().favorited_user_id),
+          ...bookmarkSnap.docs.map((d: any) => d.data().favorited_user_id),
+        ])).filter(Boolean);
         if (favIds.length > 0) {
           const userPromises = favIds.map((uid) => getDoc(doc(db, 'users', uid)));
           const userSnaps = await Promise.all(userPromises);
@@ -239,14 +247,36 @@ export const RecentsView: React.FC<RecentsViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Quick Call Back Button */}
-                    <button
-                      onClick={() => handleCallBack(partnerId, log.type)}
-                      className="p-2.5 rounded-xl bg-[#202028] hover:bg-[#FF69B4]/20 hover:text-[#FF69B4] text-zinc-300 transition"
-                      title="Call Back"
-                    >
-                      {log.type === 'video' ? <Video className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
-                    </button>
+                    {/* Quick Call Back & Chat Buttons */}
+                    <div className="flex items-center gap-1.5">
+                      {onOpenChat && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const snap = await getDoc(doc(db, 'users', partnerId));
+                              if (snap.exists()) {
+                                onOpenChat({ uid: snap.id, ...snap.data() } as UserProfile);
+                              }
+                            } catch (e) {
+                              console.error(e);
+                            }
+                          }}
+                          className="p-2.5 rounded-xl bg-[#202028] hover:bg-[#FF69B4]/20 hover:text-[#FF69B4] text-zinc-300 transition cursor-pointer"
+                          title="Chat"
+                        >
+                          <MessageCircle className="w-4 h-4" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleCallBack(partnerId, log.type)}
+                        className="p-2.5 rounded-xl bg-[#202028] hover:bg-[#FF69B4]/20 hover:text-[#FF69B4] text-zinc-300 transition cursor-pointer"
+                        title="Call Back"
+                      >
+                        {log.type === 'video' ? <Video className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
+                      </button>
+                    </div>
                   </div>
                 );
               })}
@@ -296,17 +326,29 @@ export const RecentsView: React.FC<RecentsViewProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    {onOpenChat && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenChat(user)}
+                        className="p-2.5 rounded-xl bg-[#202028] text-zinc-300 hover:text-[#FF69B4] hover:bg-[#FF69B4]/15 transition cursor-pointer"
+                        title="Chat"
+                      >
+                        <MessageCircle className="w-4 h-4" />
+                      </button>
+                    )}
                     <button
+                      type="button"
                       onClick={() => onVoiceCall(user)}
-                      className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition"
+                      className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition cursor-pointer"
                       title="Voice Call"
                     >
                       <Phone className="w-4 h-4" />
                     </button>
                     <button
+                      type="button"
                       onClick={() => onVideoCall(user)}
-                      className="p-2.5 rounded-xl bg-[#FF69B4]/20 text-[#FF69B4] hover:bg-[#FF69B4]/30 transition"
+                      className="p-2.5 rounded-xl bg-[#FF69B4]/20 text-[#FF69B4] hover:bg-[#FF69B4]/30 transition cursor-pointer"
                       title="Video Call"
                     >
                       <Video className="w-4 h-4" />

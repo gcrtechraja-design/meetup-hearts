@@ -19,6 +19,7 @@ import { saveRoomToSupabase, updateRoomInSupabase } from '../services/supabase';
 import { getUserAvatarUrl } from '../services/staticCdnService';
 import { ringtoneService } from '../services/ringtoneService';
 import { isListenerOffline } from '../utils/presence';
+import { DUMMY_LISTENERS } from '../data/dummyListeners';
 import { 
   sendCallPushNotification, 
   cancelBackgroundCallNotification, 
@@ -487,7 +488,17 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       });
 
-      // If no candidates found
+      // If no candidates found in Firestore, fallback to DUMMY_LISTENERS
+      if (candidates.length === 0) {
+        const dummyCandidates = DUMMY_LISTENERS.filter(
+          (d) => d.uid !== currentUser.uid && !excludedIds.includes(d.uid)
+        );
+        if (dummyCandidates.length > 0) {
+          candidates.push(...dummyCandidates);
+        }
+      }
+
+      // If still no candidates found
       if (candidates.length === 0) {
         if (attemptNum < 3 && excludedIds.length > 0) {
           // If we had excluded previously declined listeners but there are other listeners or no more free

@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { X, Coins, Sparkles, AlertTriangle } from 'lucide-react';
+import { X, Coins, Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { CoinStorePlan, getAdminUpiId } from '../services/paymentService';
+import { CoinStorePlan } from '../services/paymentService';
 import { ManualPaymentPopup } from './ManualPaymentPopup';
+
+export const ADMIN_UPI_ID = 'rajasuvimarriage09-1@okhdfcbank';
+export const ADMIN_NAME = 'MeetUp';
 
 export interface CoinPack {
   id: string;
@@ -83,50 +86,17 @@ interface WalletModalProps {
 export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
   const { currentUser } = useAuth();
   const [selectedPlanForPayment, setSelectedPlanForPayment] = useState<CoinStorePlan | null>(null);
-  const [fetchedUpiId, setFetchedUpiId] = useState<string | null>(null);
-  const [isLoadingConfig, setIsLoadingConfig] = useState<boolean>(true);
-  const [configError, setConfigError] = useState<string | null>(null);
 
-  // On Coin Store / Wallet load, fetch UPI ID from Firestore: collection 'settings', doc 'payment_config', field 'upi_id'
+  // Save admin UPI ID to localStorage key "admin_upi_id"
   useEffect(() => {
-    let isMounted = true;
-    setIsLoadingConfig(true);
-    setConfigError(null);
-
-    getAdminUpiId()
-      .then((upi) => {
-        if (!isMounted) return;
-        if (!upi || !upi.trim()) {
-          setFetchedUpiId(null);
-          setConfigError('Payment config not found');
-        } else {
-          setFetchedUpiId(upi.trim());
-          setConfigError(null);
-        }
-      })
-      .catch((err) => {
-        if (!isMounted) return;
-        console.error('WalletModal: Error fetching UPI ID:', err);
-        setFetchedUpiId(null);
-        setConfigError('Payment config not found');
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoadingConfig(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('admin_upi_id', ADMIN_UPI_ID);
+      } catch {}
+    }
   }, []);
 
-  const isBuyDisabled = isLoadingConfig || Boolean(configError) || !fetchedUpiId;
-
   const handleSelectPack = (pack: CoinPack | { coins: number; price: number; originalPrice?: number; discountText?: string }) => {
-    console.log('selected pack:', pack);
-    if (isBuyDisabled) return;
-
     setSelectedPlanForPayment({
       coins: pack.coins,
       amount: pack.price,
@@ -185,25 +155,10 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
           </div>
         </div>
 
-        {/* If Error: Show "Payment config not found" banner */}
-        {configError && !isLoadingConfig && (
-          <div className="my-3 p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 flex items-center gap-2.5 text-xs animate-in fade-in">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-            <div className="flex-1">
-              <span className="font-bold block">Payment config not found</span>
-              <span className="text-[11px] text-rose-300/80">
-                Buy buttons are disabled until the administrator configures the UPI ID in settings.
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Top Banner Offer */}
+        {/* Top Banner Offer: 2500 coins ₹620 */}
         <div
           onClick={() => handleSelectPack({ coins: 2500, price: 620, originalPrice: 1250, discountText: 'Flat ₹630 off' })}
-          className={`my-3.5 relative overflow-hidden rounded-2xl p-3.5 sm:p-4 bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-600 text-white shadow-lg transition-all group ${
-            isBuyDisabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer hover:opacity-95'
-          }`}
+          className="my-3.5 relative overflow-hidden rounded-2xl p-3.5 sm:p-4 bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-600 text-white shadow-lg transition-all group cursor-pointer hover:opacity-95 hover:scale-[1.01] active:scale-[0.99]"
         >
           <div className="flex items-center justify-between">
             <div className="space-y-1">
@@ -224,7 +179,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
           </div>
         </div>
 
-        {/* 3 Column Grid of Coin Packs */}
+        {/* 3 Column Grid of Coin Packs - Always Enabled */}
         <div className="space-y-2 mt-4">
           <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
             More Coin Packs
@@ -235,11 +190,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
               <div
                 key={pack.id}
                 onClick={() => handleSelectPack(pack)}
-                className={`relative bg-[#161622] border rounded-2xl p-2.5 sm:p-3 flex flex-col items-center justify-between text-center transition-all duration-200 shadow-md group ${
-                  isBuyDisabled
-                    ? 'border-[#272738] opacity-60 cursor-not-allowed'
-                    : 'hover:bg-[#1C1C2A] border-[#272738] hover:border-zinc-500 cursor-pointer hover:shadow-xl'
-                }`}
+                className="relative bg-[#161622] border border-[#272738] hover:border-emerald-500/60 rounded-2xl p-2.5 sm:p-3 flex flex-col items-center justify-between text-center transition-all duration-200 shadow-md group hover:bg-[#1C1C2A] cursor-pointer hover:shadow-xl hover:scale-[1.02] active:scale-[0.98]"
               >
                 {/* Top Badge */}
                 {pack.badge && (
@@ -279,7 +230,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
                       {pack.discountText}
                     </span>
                   )}
-                  <span className={`text-xs sm:text-sm font-black mt-0.5 ${isBuyDisabled ? 'text-zinc-400' : 'text-emerald-400'}`}>
+                  <span className="text-xs sm:text-sm font-black mt-0.5 text-emerald-400 group-hover:text-emerald-300">
                     ₹{pack.price}
                   </span>
                 </div>
@@ -306,10 +257,10 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
       </div>
 
       {/* Manual Payment Popup Modal */}
-      {selectedPlanForPayment && fetchedUpiId && (
+      {selectedPlanForPayment && (
         <ManualPaymentPopup
           plan={selectedPlanForPayment}
-          initialUpiId={fetchedUpiId}
+          initialUpiId={ADMIN_UPI_ID}
           onClose={() => setSelectedPlanForPayment(null)}
         />
       )}

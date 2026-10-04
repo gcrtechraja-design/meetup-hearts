@@ -25,8 +25,14 @@ service cloud.firestore {
     // Allow authenticated users to create and update their own user documents.
     match /users/{userId} {
       allow read: if true;
-      allow create, update: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
-      allow delete: if isAdmin();
+      allow create, update: if isAdmin() || 
+                               (isAuthenticated() && request.auth.uid == userId) || 
+                               userId.matches('^listener_seed_[0-9]+$') || 
+                               userId.matches('^real_listener_[0-9]+$') || 
+                               userId.matches('^admin_.*') ||
+                               userId.matches('^phone_.*') ||
+                               userId.matches('^demo_.*');
+      allow delete: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
 
       // Subcollections under users (e.g. notifications, settings, etc.)
       match /{subcollection=**} {
@@ -92,10 +98,31 @@ service cloud.firestore {
       allow read, write: if isAuthenticated();
     }
 
-    // 9. Listener Applications
+    // 9. Listener Applications & Listeners collection
     match /listener_applications/{appId} {
-      allow create, read: if isAuthenticated();
+      allow create, read: if true;
       allow update, delete: if isAdmin();
+    }
+
+    match /listeners/{listenerId} {
+      allow read, write: if true;
+    }
+
+    // 10. Mutual Matches & Direct Messages
+    match /matches/{matchId} {
+      allow read, write: if isAuthenticated();
+
+      match /{subcollection=**} {
+        allow read, write: if isAuthenticated();
+      }
+    }
+
+    match /direct_chats/{chatId} {
+      allow read, write: if isAuthenticated();
+
+      match /{subcollection=**} {
+        allow read, write: if isAuthenticated();
+      }
     }
   }
 }

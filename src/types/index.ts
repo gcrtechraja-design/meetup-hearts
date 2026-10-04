@@ -8,6 +8,7 @@ export type UserStatus = 'online' | 'offline' | 'busy' | 'unavailable';
 
 export interface UserProfile {
   uid: string;
+  id?: string;
   name: string;
   email: string;
   phone?: string;
@@ -22,6 +23,12 @@ export interface UserProfile {
   interests: string[];
   language: string;
   role: UserRole;
+  is_listener?: boolean;
+  isListener?: boolean;
+  isActive?: boolean;
+  is_active?: boolean;
+  isDummy?: boolean;
+  is_dummy?: boolean;
   is_admin?: boolean;
   isAdmin?: boolean;
   coins_balance: number;

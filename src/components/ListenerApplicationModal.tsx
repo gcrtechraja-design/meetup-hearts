@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { X, Sparkles, CheckCircle2, UserCheck, Languages, DollarSign, Headphones } from 'lucide-react';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { X, Sparkles, CheckCircle2, UserCheck, Languages, DollarSign, Headphones, AlertCircle, Loader2 } from 'lucide-react';
+import { collection, addDoc, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase/config';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, stripUndefinedFields } from '../context/AuthContext';
 import { getRandomListenerAvatar } from '../data/listenerAvatars';
 
 interface ListenerApplicationModalProps {
@@ -19,6 +19,7 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
   const [allowVideoCalls, setAllowVideoCalls] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [errorToast, setErrorToast] = useState<string | null>(null);
 
   const availableLanguages = [
     'Tamil', 'English', 'Hindi', 'Telugu', 'Malayalam', 'Kannada', 'Marathi', 'Bengali', 'Gujarati', 'Punjabi'
@@ -34,7 +35,13 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentUser) return;
+    setErrorToast(null);
+
+    if (!currentUser) {
+      setErrorToast('Please log in to submit your listener application.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -42,23 +49,32 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
         ? currentUser.profile_pic 
         : getRandomListenerAvatar();
 
-      await addDoc(collection(db, 'listener_applications'), {
+      const payload = stripUndefinedFields({
         user_id: currentUser.uid,
-        name: currentUser.name,
+        name: currentUser.name || 'Member',
+        email: currentUser.email || '',
         profile_pic: assignedPic,
         avatar_url: assignedPic,
-        languages,
-        experience,
-        voice_rate: Number(voiceRate),
-        video_rate: Number(videoRate),
-        allowVideoCalls,
+        languages: languages.length > 0 ? languages : ['Tamil', 'English'],
+        experience: experience.trim() || 'Friendly listener',
+        voice_rate: Number(voiceRate) || 10,
+        video_rate: Number(videoRate) || 50,
+        allowVideoCalls: Boolean(allowVideoCalls),
         status: 'pending',
         created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
       });
+
+      // 1. Add to listener_applications collection with await
+      await addDoc(collection(db, 'listener_applications'), payload);
+
+      // 2. Also register in listeners collection with await
+      await setDoc(doc(db, 'listeners', currentUser.uid), payload, { merge: true });
+
       setSubmitted(true);
-    } catch (err) {
-      console.error('Failed to submit listener application:', err);
-      alert('Submission failed. Please try again.');
+    } catch (err: any) {
+      console.error('[ListenerApplication] Submission error:', err);
+      setErrorToast(err?.message || 'Submission failed. Please check your connection and try again.');
     } finally {
       setSubmitting(false);
     }
@@ -87,6 +103,20 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {errorToast && (
+          <div className="my-3 p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2 animate-in fade-in">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span className="flex-1">{errorToast}</span>
+            <button 
+              type="button" 
+              onClick={() => setErrorToast(null)} 
+              className="p-1 hover:text-white text-zinc-400"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {submitted ? (
           <div className="py-10 text-center flex flex-col items-center space-y-3">

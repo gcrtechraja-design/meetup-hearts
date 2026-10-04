@@ -8,6 +8,7 @@ import {
   addDoc, 
   deleteDoc, 
   doc,
+  setDoc,
   serverTimestamp,
   limit,
   startAfter,
@@ -16,7 +17,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { UserProfile } from '../types';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, stripUndefinedFields } from '../context/AuthContext';
 import { useCall } from '../context/CallContext';
 import { DiscoveryCard } from './DiscoveryCard';
 import { DiscoveryCardSkeleton } from './DiscoveryCardSkeleton';
@@ -37,21 +38,24 @@ import {
 import { isListenerOffline } from '../utils/presence';
 import { CITIES, findCity, calculateDistanceKm } from '../utils/cities';
 import { getConsistentListenerAvatar } from '../data/listenerAvatars';
+import { DUMMY_LISTENERS } from '../data/dummyListeners';
 
 interface DiscoveryFeedProps {
   onVoiceCall: (user: UserProfile) => void;
   onVideoCall: (user: UserProfile) => void;
   onOpenProfile: (user: UserProfile) => void;
   onOpenReportBlock: (user: UserProfile) => void;
+  onOpenChat?: (user: UserProfile) => void;
 }
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
 
 export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
   onVoiceCall,
   onVideoCall,
   onOpenProfile,
   onOpenReportBlock,
+  onOpenChat,
 }) => {
   const { currentUser } = useAuth();
   const { 
@@ -61,35 +65,39 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
     closeNoListenersPopup 
   } = useCall();
 
-  // Listeners state with infinite scroll pagination
-  const [listeners, setListeners] = useState<UserProfile[]>([]);
+  // Listeners state initialized with all 15 dummy listeners (Priya Rajendran + 14 others)
+  const [listeners, setListeners] = useState<UserProfile[]>(DUMMY_LISTENERS);
   const [lastVisibleDoc, setLastVisibleDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const [hasMore, setHasMore] = useState<boolean>(true);
-  const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
+  const [hasMore, setHasMore] = useState<boolean>(false);
+  const [loadingInitial, setLoadingInitial] = useState<boolean>(false);
   const [loadingMore, setLoadingMore] = useState<boolean>(false);
 
   // User relationships
   const [blockedUserIds, setBlockedUserIds] = useState<string[]>([]);
   const [favoriteUserIds, setFavoriteUserIds] = useState<string[]>([]);
   const [favoriteDocMap, setFavoriteDocMap] = useState<Record<string, string>>({});
+  const [matchedUser, setMatchedUser] = useState<UserProfile | null>(null);
+  const [passedUserIds, setPassedUserIds] = useState<string[]>([]);
 
-  // Search & Filter State
+  // Search & Filter State - empty search bar and "All" tag by default
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedLanguage, setSelectedLanguage] = useState<string>('all');
   const [filterOnlineOnly, setFilterOnlineOnly] = useState<boolean>(false);
 
-  // Location & Distance Filter (Requirement 3)
-  const defaultCityName = currentUser?.city || (currentUser?.location ? findCity(currentUser.location).name : 'Chennai');
+  // Location & Distance Filter (Requirement 2: Max Distance 1000km default, Chennai location)
+  const defaultCityName = 'Chennai';
   const [selectedUserCity, setSelectedUserCity] = useState<string>(defaultCityName);
   const [isDistanceFilterActive, setIsDistanceFilterActive] = useState<boolean>(false);
-  const [distanceRangeKm, setDistanceRangeKm] = useState<number>(200);
+  const [distanceRangeKm, setDistanceRangeKm] = useState<number>(1000);
 
   useEffect(() => {
     if (currentUser?.city) {
       setSelectedUserCity(currentUser.city);
     } else if (currentUser?.location) {
       setSelectedUserCity(findCity(currentUser.location).name);
+    } else {
+      setSelectedUserCity('Chennai');
     }
   }, [currentUser?.city, currentUser?.location]);
 
@@ -180,103 +188,17 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
     return 0;
   };
 
-  // 3. Real-time load and listener subscription for listener profiles
+  // 3. Local dummy listeners (Firestore fetch disabled to preserve dummy data as requested)
   useEffect(() => {
-    setLoadingInitial(true);
-    const usersRef = collection(db, 'users');
-    const q = query(
-      usersRef,
-      where('role', '==', 'listener'),
-      limit(PAGE_SIZE)
-    );
-
-    const unsubscribe = onSnapshot(q, (snap) => {
-      const items: UserProfile[] = [];
-      snap.forEach((docSnap) => {
-        const data = docSnap.data() as UserProfile;
-        const uid = docSnap.id;
-        const rawPic = (data as any).photoURL || data.profile_pic || data.avatar_url;
-        const safePic = rawPic && rawPic.trim() && !rawPic.includes('randomuser.me') 
-          ? rawPic 
-          : getConsistentListenerAvatar(uid);
-
-        items.push({
-          ...data,
-          uid,
-          profile_pic: safePic,
-          avatar_url: safePic,
-        });
-      });
-
-      // Sort newest users first
-      items.sort((a, b) => getCreatedTimestamp(b) - getCreatedTimestamp(a));
-
-      setListeners(items);
-      setLastVisibleDoc(snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null);
-      setHasMore(snap.docs.length >= PAGE_SIZE);
-      setLoadingInitial(false);
-    }, (err) => {
-      console.error('Failed to listen to listeners:', err);
-      setLoadingInitial(false);
-    });
-
-    return () => unsubscribe();
+    setLoadingInitial(false);
+    setListeners(DUMMY_LISTENERS);
   }, []);
 
-  // 4. Infinite scroll: Load next 20 profiles when user reaches bottom
+  // 4. Infinite scroll disabled for local dummy dataset
   const fetchMoreListeners = useCallback(async () => {
-    if (!lastVisibleDoc || loadingMore || !hasMore) return;
-
-    setLoadingMore(true);
-    try {
-      const usersRef = collection(db, 'users');
-      const nextQ = query(
-        usersRef,
-        where('role', '==', 'listener'),
-        startAfter(lastVisibleDoc),
-        limit(PAGE_SIZE)
-      );
-
-      const snap = await getDocs(nextQ);
-      if (snap.empty) {
-        setHasMore(false);
-        setLoadingMore(false);
-        return;
-      }
-
-      const newItems: UserProfile[] = [];
-      snap.forEach((docSnap) => {
-        const data = docSnap.data() as UserProfile;
-        const uid = docSnap.id;
-        const rawPic = (data as any).photoURL || data.profile_pic || data.avatar_url;
-        const safePic = rawPic && rawPic.trim() && !rawPic.includes('randomuser.me') 
-          ? rawPic 
-          : getConsistentListenerAvatar(uid);
-
-        newItems.push({
-          ...data,
-          uid,
-          profile_pic: safePic,
-          avatar_url: safePic,
-        });
-      });
-
-      setListeners((prev) => {
-        const existingIds = new Set(prev.map((p) => p.uid));
-        const filteredNew = newItems.filter((p) => !existingIds.has(p.uid));
-        const combined = [...prev, ...filteredNew];
-        combined.sort((a, b) => getCreatedTimestamp(b) - getCreatedTimestamp(a));
-        return combined;
-      });
-
-      setLastVisibleDoc(snap.docs[snap.docs.length - 1]);
-      setHasMore(snap.docs.length >= PAGE_SIZE);
-    } catch (err) {
-      console.error('Failed to fetch more listeners:', err);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [lastVisibleDoc, loadingMore, hasMore]);
+    setHasMore(false);
+    setLoadingMore(false);
+  }, []);
 
   // IntersectionObserver for bottom sentinel
   useEffect(() => {
@@ -323,6 +245,7 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
       }
     } else {
       setFavoriteUserIds((prev) => [...prev, targetUserId]);
+      const targetProfile = listeners.find((l) => l.uid === targetUserId);
       try {
         const newDoc = await addDoc(collection(db, 'user_favourites'), {
           user_id: currentUser.uid,
@@ -330,8 +253,44 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
           created_at: serverTimestamp(),
         });
         setFavoriteDocMap((prev) => ({ ...prev, [targetUserId]: newDoc.id }));
+
+        // Create mutual match document in matches collection
+        const matchId = [currentUser.uid, targetUserId].sort().join('_');
+        await setDoc(doc(db, 'matches', matchId), stripUndefinedFields({
+          id: matchId,
+          users: [currentUser.uid, targetUserId],
+          created_at: serverTimestamp(),
+          updated_at: serverTimestamp(),
+          last_message: "It's a Match! Say hello ❤️",
+          last_message_at: serverTimestamp(),
+        }), { merge: true });
+
+        // Also provision direct chat
+        await setDoc(doc(db, 'direct_chats', matchId), stripUndefinedFields({
+          id: matchId,
+          users: [currentUser.uid, targetUserId],
+          last_message: "It's a Match! Say hello ❤️",
+          last_message_at: serverTimestamp(),
+          last_sender_id: currentUser.uid,
+          updated_at: serverTimestamp(),
+        }), { merge: true });
+
+        // Trigger browser notification
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+          try {
+            new Notification("It's a Match! ❤️", {
+              body: `You matched with ${targetProfile?.name || 'someone special'}! Say hi in chat.`,
+              icon: targetProfile?.profile_pic || '/favicon.png',
+            });
+          } catch {}
+        }
+
+        // Trigger Match celebration popup
+        if (targetProfile) {
+          setMatchedUser(targetProfile);
+        }
       } catch (e) {
-        console.error('Failed to add favourite:', e);
+        console.error('Failed to add favourite / match:', e);
       }
     }
   };
@@ -481,7 +440,7 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
                 type="button"
                 onClick={() => {
                   setIsDistanceFilterActive(false);
-                  setDistanceRangeKm(200);
+                  setDistanceRangeKm(1000);
                 }}
                 className="px-2.5 py-1 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
                 title="Clear filter to show all listeners"
@@ -506,7 +465,7 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
           </div>
         </div>
 
-        {/* Distance Range Slider: 1 km to 1000 km, default 200 km */}
+        {/* Distance Range Slider: 1 km to 1000 km, default 1000 km */}
         <div className="space-y-1 pt-1 border-t border-zinc-800/60">
           <div className="flex items-center justify-between text-[11px]">
             <span className="text-zinc-400">
@@ -538,9 +497,9 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
 
           <div className="flex justify-between text-[10px] text-zinc-500 font-mono">
             <span>1 km</span>
-            <span>200 km (Default)</span>
+            <span>200 km</span>
             <span>500 km</span>
-            <span>1000 km</span>
+            <span>1000 km (Default)</span>
           </div>
         </div>
       </div>
@@ -744,6 +703,94 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
             >
               Cancel Call
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* "It's a Match! 🎉" Mutual Match Modal */}
+      {matchedUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in">
+          <div className="w-full max-w-sm bg-gradient-to-b from-[#1C1322] to-[#12121A] border border-[#FF6BA9]/40 rounded-3xl p-6 text-center shadow-[0_0_50px_rgba(255,107,169,0.35)] relative flex flex-col items-center">
+            {/* Close Button */}
+            <button
+              type="button"
+              onClick={() => setMatchedUser(null)}
+              className="absolute top-4 right-4 p-1.5 rounded-full bg-black/40 text-zinc-400 hover:text-white transition cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            {/* Avatars Overlapping Match Animation */}
+            <div className="flex items-center justify-center -space-x-4 my-3">
+              <div className="w-16 h-16 rounded-full border-2 border-[#FF6BA9] overflow-hidden shadow-lg shadow-[#FF6BA9]/30">
+                <img
+                  src={currentUser?.profile_pic || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
+                  alt="You"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+              <div className="w-10 h-10 rounded-full bg-[#FF6BA9] flex items-center justify-center text-white z-10 shadow-lg scale-110">
+                <Heart className="w-5 h-5 fill-white animate-bounce" />
+              </div>
+              <div className="w-16 h-16 rounded-full border-2 border-pink-400 overflow-hidden shadow-lg shadow-pink-500/30">
+                <img
+                  src={matchedUser.profile_pic || getConsistentListenerAvatar(matchedUser.uid)}
+                  alt={matchedUser.name}
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-[11px] uppercase tracking-widest font-black text-[#FF6BA9]">
+                Mutual Match
+              </span>
+              <h3 className="text-2xl font-black text-white">
+                It's a Match! 🎉
+              </h3>
+              <p className="text-xs text-zinc-300 max-w-xs mt-1 leading-relaxed">
+                You and <strong className="text-white">{matchedUser.name}</strong> like each other! Break the ice now.
+              </p>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="grid grid-cols-1 gap-2.5 w-full mt-6">
+              {onOpenChat && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = matchedUser;
+                    setMatchedUser(null);
+                    onOpenChat(target);
+                  }}
+                  className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#FF6BA9] to-[#FF4D8D] text-white font-bold text-xs shadow-lg shadow-[#FF6BA9]/30 hover:brightness-110 active:scale-95 transition flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Send Message in Chat</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  const target = matchedUser;
+                  setMatchedUser(null);
+                  onVoiceCall(target);
+                }}
+                className="w-full py-3 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 hover:bg-emerald-500/30 text-emerald-300 font-bold text-xs active:scale-95 transition flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Phone className="w-3.5 h-3.5" />
+                <span>Audio Call Now</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMatchedUser(null)}
+                className="w-full py-2.5 text-zinc-400 hover:text-white font-semibold text-xs transition cursor-pointer"
+              >
+                Keep Browsing
+              </button>
+            </div>
           </div>
         </div>
       )}

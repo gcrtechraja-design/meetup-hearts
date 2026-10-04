@@ -209,6 +209,11 @@ export const signUpWithSupabase = async (params: {
  * Supabase Auth: Sign In with email & password
  */
 export const signInWithSupabase = async (email: string, pass: string) => {
+  const { isConfigured } = getSupabaseCredentials();
+  if (!isConfigured) {
+    throw new Error('SUPABASE_NOT_CONFIGURED');
+  }
+
   const supabase = getSupabaseClient();
   const trimmedEmail = email.trim().toLowerCase();
 

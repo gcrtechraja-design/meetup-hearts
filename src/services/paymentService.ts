@@ -21,26 +21,25 @@ export interface CoinStorePlan {
   popular?: boolean;
 }
 
+export const ADMIN_UPI_ID = 'rajasuvimarriage09-1@okhdfcbank';
+export const ADMIN_NAME = 'MeetUp';
+
 export const COIN_STORE_PLANS: CoinStorePlan[] = [
   { coins: 100, amount: 99 },
   { coins: 500, amount: 399, popular: true },
 ];
 
 /**
- * Fetch the current admin-configured UPI ID from Firestore settings collection.
- * Document ID: payment_config, Field: upi_id
- * If not found or empty, throws Error('Payment config not found')
+ * Fetch the current admin-configured UPI ID.
+ * Returns hardcoded ADMIN_UPI_ID and saves to localStorage key "admin_upi_id".
  */
 export async function getAdminUpiId(): Promise<string> {
-  const docRef = doc(db, 'settings', 'payment_config');
-  const snap = await getDoc(docRef);
-  if (snap.exists()) {
-    const data = snap.data();
-    if (data && typeof data.upi_id === 'string' && data.upi_id.trim()) {
-      return data.upi_id.trim();
-    }
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem('admin_upi_id', ADMIN_UPI_ID);
+    } catch {}
   }
-  throw new Error('Payment config not found');
+  return ADMIN_UPI_ID;
 }
 
 /**
@@ -52,11 +51,63 @@ export async function updateAdminUpiId(newUpiId: string): Promise<void> {
   if (!cleanId || !cleanId.includes('@')) {
     throw new Error('Please enter a valid UPI ID (e.g. name@bank)');
   }
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem('admin_upi_id', cleanId);
+    } catch {}
+  }
   const docRef = doc(db, 'settings', 'payment_config');
   await setDoc(docRef, {
     upi_id: cleanId,
+    admin_name: ADMIN_NAME,
     updated_at: serverTimestamp()
   }, { merge: true });
+}
+
+/**
+ * Complete user payment: immediately adds coins to balance and records transaction
+ */
+export async function completeUserPayment(params: {
+  userId: string;
+  coins: number;
+  amount: number;
+  utr?: string;
+  upiIdUsed?: string;
+}): Promise<void> {
+  const cleanUtr = (params.utr || '').trim() || `UPI_${Date.now()}`;
+  const upiUsed = params.upiIdUsed || ADMIN_UPI_ID;
+
+  // 1. Add coins to user document in Firestore
+  const userRef = doc(db, 'users', params.userId);
+  try {
+    await updateDoc(userRef, {
+      coins_balance: increment(params.coins),
+      coin_balance: increment(params.coins),
+      updated_at: serverTimestamp(),
+    });
+  } catch {
+    await setDoc(userRef, {
+      coins_balance: increment(params.coins),
+      coin_balance: increment(params.coins),
+      updated_at: serverTimestamp(),
+    }, { merge: true });
+  }
+
+  // 2. Record completed transaction
+  try {
+    await addDoc(collection(db, 'transactions'), {
+      userId: params.userId,
+      coins: params.coins,
+      amount: params.amount,
+      utr: cleanUtr,
+      upi_id_used: upiUsed,
+      status: 'completed',
+      type: 'coin_purchase',
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('Transaction record notice:', err);
+  }
 }
 
 /**
@@ -82,16 +133,14 @@ export async function submitManualPayment(params: {
     throw new Error('Please enter a valid 12-digit numeric UTR number.');
   }
 
-  if (!params.upiIdUsed) {
-    throw new Error('Payment config not found');
-  }
+  const upiUsed = params.upiIdUsed || ADMIN_UPI_ID;
 
   const txData = {
     userId: params.userId,
     coins: params.coins,
     amount: params.amount,
     utr: cleanUtr,
-    upi_id_used: params.upiIdUsed,
+    upi_id_used: upiUsed,
     status: 'pending' as const,
     createdAt: serverTimestamp(),
   };

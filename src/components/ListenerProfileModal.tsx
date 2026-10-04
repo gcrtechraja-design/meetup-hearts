@@ -12,6 +12,7 @@ interface ListenerProfileModalProps {
   onToggleFavorite: (id: string) => void;
   onVoiceCall: (user: UserProfile) => void;
   onVideoCall: (user: UserProfile) => void;
+  onOpenChat?: (user: UserProfile) => void;
   onClose: () => void;
 }
 
@@ -21,6 +22,7 @@ export const ListenerProfileModal: React.FC<ListenerProfileModalProps> = ({
   onToggleFavorite,
   onVoiceCall,
   onVideoCall,
+  onOpenChat,
   onClose,
 }) => {
   const { currentUser } = useAuth();
@@ -197,6 +199,19 @@ export const ListenerProfileModal: React.FC<ListenerProfileModalProps> = ({
               <span className="w-2 h-2 rounded-full bg-zinc-500"></span>
               <span>{user.name} is currently offline and unavailable for calls</span>
             </div>
+          )}
+
+          {onOpenChat && (
+            <button
+              onClick={() => {
+                onClose();
+                onOpenChat(user);
+              }}
+              className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-sm transition bg-[#1E1E28] hover:bg-[#282836] text-white border border-[#303042] active:scale-95 cursor-pointer shadow-md"
+            >
+              <MessageCircle className="w-4 h-4 text-[#FF69B4]" />
+              <span>Chat</span>
+            </button>
           )}
 
           <button

@@ -181,14 +181,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     } catch (err: any) {
       console.error('[AuthModal] Signup error:', err);
       let realError = err.message || 'Failed to create account.';
-      if (err.code === 'auth/operation-not-allowed') {
-        realError = 'Firebase Error (auth/operation-not-allowed): Email/Password sign-in provider is disabled in Firebase Console. Please go to Firebase Console > Authentication > Sign-in method and enable "Email/Password".';
+      const currentDomain = typeof window !== 'undefined' ? window.location.hostname : 'your-domain';
+
+      if (err.code === 'auth/operation-not-allowed' || (err.message && err.message.includes('operation-not-allowed'))) {
+        console.warn(
+          `[Firebase Auth Warning] Email/Password provider is disabled in Firebase Console or domain is not authorized!\n` +
+          `1. Go to Firebase Console > Authentication > Sign-in method > Enable "Email/Password".\n` +
+          `2. Go to Firebase Console > Authentication > Settings > Authorized domains > Add "${currentDomain}".`
+        );
+        realError = `Email/Password sign-in is disabled or domain is not authorized. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), and add "${currentDomain}" to Authorized domains (Authentication > Settings).`;
       } else if (err.code === 'auth/email-already-in-use') {
-        realError = 'Firebase Error (auth/email-already-in-use): An account with this email already exists in Firebase Authentication. Please sign in instead.';
+        realError = 'An account with this email already exists in Firebase Authentication. Please sign in instead.';
       } else if (err.code === 'auth/weak-password') {
-        realError = 'Firebase Error (auth/weak-password): Password must be at least 6 characters.';
+        realError = 'Password must be at least 6 characters.';
       } else if (err.code === 'auth/invalid-email') {
-        realError = 'Firebase Error (auth/invalid-email): The email address is badly formatted.';
+        realError = 'The email address is badly formatted.';
       }
       setErrorMsg(realError);
       try {
@@ -207,8 +214,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     setInfoMsg(null);
     setShowResendConfirmation(false);
 
-    if (!isValidEmail(email)) {
-      const err = 'Please enter a valid email address.';
+    const trimmedInput = email.trim();
+    if (!trimmedInput) {
+      const err = 'Please enter your email address or User ID (UID).';
       setErrorMsg(err);
       try { if (typeof window !== 'undefined' && typeof window.alert === 'function') window.alert(err); } catch {}
       return;
@@ -221,27 +229,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     }
 
     setSubmitting(true);
-    console.log('[AuthModal] Submitting login for:', email.trim());
+    console.log('[AuthModal] Submitting login for:', trimmedInput);
     try {
-      try {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
-        console.log('[AuthModal] Firebase login successful!');
-        setInfoMsg('Login successful!');
-        if (onClose) onClose();
-        return;
-      } catch (fbErr: any) {
-        console.warn('[AuthModal] Firebase login notice:', fbErr.code, fbErr.message);
-        if (
-          fbErr.code !== 'auth/operation-not-allowed' &&
-          fbErr.code !== 'auth/invalid-credential' &&
-          fbErr.code !== 'auth/user-not-found' &&
-          fbErr.code !== 'auth/wrong-password'
-        ) {
-          throw fbErr;
+      if (trimmedInput.includes('@')) {
+        try {
+          await signInWithEmailAndPassword(auth, trimmedInput, password);
+          console.log('[AuthModal] Firebase login successful!');
+          setInfoMsg('Login successful!');
+          if (onClose) onClose();
+          return;
+        } catch (fbErr: any) {
+          console.warn('[AuthModal] Firebase login notice:', fbErr.code, fbErr.message);
         }
       }
 
-      await signInWithSupabaseAuth(email.trim(), password);
+      await signInWithSupabaseAuth(trimmedInput, password);
       console.log('[AuthModal] Fallback login successful!');
       setInfoMsg('Login successful!');
       if (onClose) onClose();
@@ -249,15 +251,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
       console.error('[AuthModal] Login error:', err);
       let realError = err.message || 'Login failed.';
       const msg = (err.message || '').toLowerCase();
-      if (
+      const currentDomain = typeof window !== 'undefined' ? window.location.hostname : 'your-domain';
+
+      if (err.code === 'auth/operation-not-allowed' || msg.includes('operation-not-allowed')) {
+        console.warn(
+          `[Firebase Auth Warning] Email/Password provider is disabled in Firebase Console or domain is not authorized!\n` +
+          `1. Go to Firebase Console > Authentication > Sign-in method > Enable "Email/Password".\n` +
+          `2. Go to Firebase Console > Authentication > Settings > Authorized domains > Add "${currentDomain}".`
+        );
+        realError = `Email/Password sign-in is disabled or domain is not authorized. Please enable "Email/Password" in Firebase Console (Authentication > Sign-in method), and add "${currentDomain}" to Authorized domains (Authentication > Settings).`;
+      } else if (
         err.code === 'auth/wrong-password' ||
         err.code === 'auth/invalid-credential' ||
         msg.includes('invalid email or password') ||
+        msg.includes('invalid password') ||
         msg.includes('invalid credentials')
       ) {
-        realError = 'Invalid email or password. Please verify your credentials and try again.';
-      } else if (err.code === 'auth/user-not-found' || msg.includes('no account found')) {
-        realError = 'No user found with this email in Firebase Authentication.';
+        realError = 'Invalid email/UID or password. Please verify your credentials and try again.';
+      } else if (err.code === 'auth/user-not-found' || msg.includes('no account found') || msg.includes('failed to fetch')) {
+        realError = 'No account found with this email or UID. Please verify your login details.';
       }
       setErrorMsg(realError);
       try {

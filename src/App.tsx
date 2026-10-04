@@ -22,6 +22,7 @@ import { IncomingCallModal } from './components/IncomingCallModal';
 import { OutgoingCallModal } from './components/OutgoingCallModal';
 import { CallScreen } from './components/CallScreen';
 import { ZegoConfigModal } from './components/ZegoConfigModal';
+import { DirectChatModal } from './components/DirectChatModal';
 import { UserProfile, AUDIO_COIN_PER_MINUTE, VIDEO_COIN_PER_MINUTE } from './types';
 import { isMeetupOwner } from './utils/admin';
 
@@ -37,6 +38,13 @@ const MainApp: React.FC = () => {
 
   // Requirement 3 & 4: Handle initial notification click on app start via deep link ?callId= and Service Worker message
   useEffect(() => {
+    // Save Admin UPI ID to localStorage key "admin_upi_id" on app start
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('admin_upi_id', 'rajasuvimarriage09-1@okhdfcbank');
+      } catch {}
+    }
+
     const urlParams = new URLSearchParams(window.location.search);
     const deepLinkCallId = urlParams.get('callId') || urlParams.get('incomingCallId');
 
@@ -83,9 +91,9 @@ const MainApp: React.FC = () => {
   }, []);
 
   // Authentication Guard:
-  // Check if user is logged in via verified currentUser or active firebaseUser session.
+  // Check if user is logged in via verified currentUser, active firebaseUser session, or local session.
   // If not logged in, redirect to Login page immediately.
-  const isUserLoggedIn = !!currentUser || !!firebaseUser;
+  const isUserLoggedIn = !!currentUser || !!firebaseUser || (typeof window !== 'undefined' && !!localStorage.getItem('meetup_active_user_uid'));
 
   useEffect(() => {
     if (loading) return;
@@ -93,6 +101,8 @@ const MainApp: React.FC = () => {
     if (!isUserLoggedIn) {
       if (window.location.pathname !== '/login' && window.location.pathname !== '/owner-login') {
         window.history.replaceState({}, '', '/login');
+      }
+      if (currentPath !== '/owner-login') {
         setCurrentPath('/login');
       }
     } else {
@@ -119,6 +129,7 @@ const MainApp: React.FC = () => {
   // Selected User for Profile Modal or Report/Block
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
   const [reportingUser, setReportingUser] = useState<UserProfile | null>(null);
+  const [chatTargetUser, setChatTargetUser] = useState<UserProfile | null>(null);
 
   // Call Initiation with Coin Balance Check (Audio: 10 coins/min, Video: 50 coins/min)
   const handleVoiceCall = async (user: UserProfile) => {
@@ -259,6 +270,7 @@ const MainApp: React.FC = () => {
               onVideoCall={handleVideoCall}
               onOpenProfile={(u) => setSelectedUser(u)}
               onOpenReportBlock={(u) => setReportingUser(u)}
+              onOpenChat={(u) => setChatTargetUser(u)}
             />
           )}
 
@@ -267,6 +279,7 @@ const MainApp: React.FC = () => {
               onVoiceCall={handleVoiceCall}
               onVideoCall={handleVideoCall}
               onOpenProfile={(u) => setSelectedUser(u)}
+              onOpenChat={(u) => setChatTargetUser(u)}
             />
           )}
 
@@ -310,7 +323,21 @@ const MainApp: React.FC = () => {
             onToggleFavorite={() => {}}
             onVoiceCall={handleVoiceCall}
             onVideoCall={handleVideoCall}
+            onOpenChat={(u) => {
+              setSelectedUser(null);
+              setChatTargetUser(u);
+            }}
             onClose={() => setSelectedUser(null)}
+          />
+        )}
+
+        {chatTargetUser && (
+          <DirectChatModal
+            targetUser={chatTargetUser}
+            isOpen={!!chatTargetUser}
+            onClose={() => setChatTargetUser(null)}
+            onVoiceCall={handleVoiceCall}
+            onVideoCall={handleVideoCall}
           />
         )}
 
