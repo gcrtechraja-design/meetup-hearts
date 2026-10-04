@@ -72,10 +72,16 @@ export const TransactionsModal: React.FC<TransactionsModalProps> = ({ onClose })
       setLoading(false);
     };
 
+    const currentUid = currentUser.uid;
+    if (!currentUid) {
+      setLoading(false);
+      return;
+    }
+
     // Query 1: standard camelCase userId
     const q1 = query(
       collection(db, 'transactions'),
-      where('userId', '==', currentUser.uid)
+      where('userId', '==', currentUid)
     );
 
     const unsub1 = onSnapshot(
@@ -95,7 +101,7 @@ export const TransactionsModal: React.FC<TransactionsModalProps> = ({ onClose })
     // Query 2: legacy snake_case user_id fallback
     const q2 = query(
       collection(db, 'transactions'),
-      where('user_id', '==', currentUser.uid)
+      where('user_id', '==', currentUid)
     );
 
     const unsub2 = onSnapshot(

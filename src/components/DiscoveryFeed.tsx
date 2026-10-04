@@ -126,7 +126,7 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
 
   // 1. Listen to Blocks for current user from blocked_users and blocks
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser?.uid) {
       setBlockedUserIds([]);
       return;
     }
@@ -148,11 +148,11 @@ export const DiscoveryFeed: React.FC<DiscoveryFeedProps> = ({
       unsub1();
       unsub2();
     };
-  }, [currentUser]);
+  }, [currentUser?.uid]);
 
   // 2. Listen to Favourites (from user_favourites collection)
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser?.uid) {
       setFavoriteUserIds([]);
       setFavoriteDocMap({});
       return;

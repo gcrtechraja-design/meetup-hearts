@@ -35,7 +35,7 @@ export const FavoritesModal: React.FC<FavoritesModalProps> = ({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!isOpen || !currentUser) {
+    if (!isOpen || !currentUser?.uid) {
       setFavoriteUsers([]);
       return;
     }

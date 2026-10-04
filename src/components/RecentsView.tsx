@@ -32,7 +32,7 @@ export const RecentsView: React.FC<RecentsViewProps> = ({
 
   // Fetch Call Logs and Bookmarks from Firestore
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser?.uid) {
       setLoading(false);
       return;
     }

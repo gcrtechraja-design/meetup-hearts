@@ -158,6 +158,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Bind real-time snapshot to user document in Firestore
   const bindUserDoc = (uid: string) => {
+    if (!uid) return;
     if (unsubscribeSnapshotRef.current) {
       unsubscribeSnapshotRef.current();
       unsubscribeSnapshotRef.current = null;
@@ -166,7 +167,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const userDocRef = doc(db, 'users', uid);
     unsubscribeSnapshotRef.current = onSnapshot(userDocRef, (docSnapshot) => {
       if (docSnapshot.exists()) {
-        const data = docSnapshot.data() as UserProfile;
+        const rawData = (docSnapshot.data() || {}) as Partial<UserProfile>;
+        const data: UserProfile = {
+          ...rawData,
+          uid: rawData.uid || docSnapshot.id || uid,
+          id: (rawData as any).id || docSnapshot.id || uid,
+        } as UserProfile;
         const isAdmin = isAdminEmail(data.email);
         if (isAdmin && (data.role !== 'admin' || !data.is_admin)) {
           data.role = 'admin';
@@ -503,7 +509,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         // 2b. Match by email field if not found by UID
-        if (!matchedDoc) {
+        if (!matchedDoc && trimmedLower && trimmedLower.includes('@')) {
           try {
             const usersRef = collection(db, 'users');
             const emailSnap = await getDocs(query(usersRef, where('email', '==', trimmedLower)));
@@ -516,7 +522,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         // 2c. Match by phone_number field if not found
-        if (!matchedDoc) {
+        if (!matchedDoc && rawIdentifier) {
           try {
             const usersRef = collection(db, 'users');
             const phoneSnap = await getDocs(query(usersRef, where('phone_number', '==', rawIdentifier)));
@@ -672,10 +678,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.log('[AuthContext] Supabase email rate limit exceeded. Creating verified account directly in Firestore for:', trimmedEmail);
 
         // Check if account already exists in Firestore
-        const usersRef = collection(db, 'users');
-        const existingSnap = await getDocs(query(usersRef, where('email', '==', trimmedEmail)));
-        if (!existingSnap.empty) {
-          throw new Error('An account with this email already exists. Please log in instead.');
+        if (trimmedEmail) {
+          const usersRef = collection(db, 'users');
+          const existingSnap = await getDocs(query(usersRef, where('email', '==', trimmedEmail)));
+          if (!existingSnap.empty) {
+            throw new Error('An account with this email already exists. Please log in instead.');
+          }
         }
 
         const hashedPass = await hashPassword(params.pass);

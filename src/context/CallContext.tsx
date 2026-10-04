@@ -99,7 +99,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Requirement 2 & 3: Listen to incoming calls for current user and trigger incoming ringtone with vibration
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser?.uid) {
       setIncomingCall(null);
       ringtoneService.stopIncomingRingtone();
       return;
