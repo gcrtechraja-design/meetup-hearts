@@ -349,47 +349,65 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
 
     setUploadingPic(true);
-    setUploadNotice('Uploading photo to Supabase Storage...');
+    setUploadNotice("Uploading photo to Supabase Storage 'photos' bucket...");
+
+    // 5. Add a 15 second timeout - if upload takes longer, show error and reset the "Uploading..." text
+    let isFinished = false;
+    const timeoutId = setTimeout(() => {
+      if (!isFinished) {
+        isFinished = true;
+        setUploadingPic(false);
+        setUploadNotice(null);
+        alert('Photo upload timed out after 15 seconds. Please check your network and try again.');
+      }
+    }, 15000);
 
     try {
-      // 1. Upload selected photo to 'photos' bucket and get public URL
+      // 1. uploadPhotoToSupabase logs before and after upload
+      // 2. wraps in try/catch and shows actual error
+      // 3. calls getPublicUrl()
+      // 4. updates profiles table in separate try/catch
       const publicUrl = await uploadPhotoToSupabase(file, currentUser.uid);
 
-      // 2. Persist public URL to Firestore user profile
-      await updateDoc(doc(db, 'users', currentUser.uid), {
-        profile_pic: publicUrl,
-        avatar_url: publicUrl,
-      });
+      if (isFinished) return;
+      isFinished = true;
+      clearTimeout(timeoutId);
 
-      // 3. Sync to Supabase users table if available
+      // Persist public URL to Firestore user profile (non-blocking if offline)
       try {
-        await syncUserToSupabase({
-          ...currentUser,
+        const userDocRef = doc(db, 'users', currentUser.uid);
+        await setDoc(userDocRef, {
           profile_pic: publicUrl,
           avatar_url: publicUrl,
-        });
-      } catch (syncErr) {
-        console.warn('Notice: user table sync after photo upload:', syncErr);
+          avatar: publicUrl,
+          photoURL: publicUrl,
+          updated_at: serverTimestamp(),
+        }, { merge: true });
+
+        if (auth.currentUser) {
+          try {
+            await updateProfile(auth.currentUser, { photoURL: publicUrl });
+          } catch {}
+        }
+      } catch (fsErr) {
+        console.warn('[ProfileView] Firestore user doc update notice:', fsErr);
       }
 
       setUploadNotice('Photo uploaded to Supabase Storage & updated successfully!');
       setTimeout(() => setUploadNotice(null), 3500);
     } catch (err: any) {
-      console.error('Supabase photo upload error:', err);
-      // Fallback if Supabase credentials are not yet set in environment
-      if (err.message?.includes('Supabase is not configured')) {
-        try {
-          const fallbackUrl = await uploadImageToStaticCdn(file);
-          await updateDoc(doc(db, 'users', currentUser.uid), {
-            profile_pic: fallbackUrl,
-          });
-          setUploadNotice('Photo saved to profile (Supabase credentials pending in env)');
-          setTimeout(() => setUploadNotice(null), 3500);
-          return;
-        } catch {}
-      }
-      alert(err.message || 'Photo upload failed. Please verify Supabase Storage configuration.');
+      if (isFinished) return;
+      isFinished = true;
+      clearTimeout(timeoutId);
+      console.error('[ProfileView] Photo upload error:', err);
+      // 2. Show the actual error with alert(error.message)
+      const errorMsg = err?.message || 'Failed to upload photo to Supabase Storage.';
+      alert(errorMsg);
+      setUploadNotice(errorMsg);
+      setTimeout(() => setUploadNotice(null), 4000);
     } finally {
+      clearTimeout(timeoutId);
+      // 6. Reset the uploading status text on both success and failure
       setUploadingPic(false);
       // Reset input element value so user can re-upload if needed
       if (e.target) e.target.value = '';
@@ -1281,7 +1299,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         isOpen={showAvatarSheet}
         onClose={() => setShowAvatarSheet(false)}
         currentAvatarUrl={cdnAvatarUrl}
-        onUploadFromDevice={() => fileInputRef.current?.click()}
+        onUploadFromDevice={() => {
+          setShowAvatarSheet(false);
+          fileInputRef.current?.click();
+        }}
         onSaveAvatar={handleSaveAvatar}
         initialView={sheetInitialView}
       />

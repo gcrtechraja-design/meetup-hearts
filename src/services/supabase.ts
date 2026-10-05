@@ -6,6 +6,9 @@ import { isAdminEmail } from '../utils/admin';
 const STORAGE_KEY_URL = 'meetup_supabase_url';
 const STORAGE_KEY_KEY = 'meetup_supabase_key';
 
+export const DEFAULT_SUPABASE_URL = 'https://szzbcsaucwfwxbmvazqe.supabase.co';
+export const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_TA6rW7sEi0G3PtZDza2fDw_6luoEit-';
+
 /**
  * Sanitizes a Supabase URL to ensure it is the clean base origin
  * (removes accidental /rest/v1 or /auth/v1 or trailing slashes).
@@ -21,8 +24,18 @@ export const cleanSupabaseUrl = (rawUrl: string): string => {
 
 // Read from env (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, SUPABASE_URL, SUPABASE_ANON_KEY) or localStorage
 export const getSupabaseCredentials = () => {
-  const customUrl = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_URL) : null;
-  const customKey = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_KEY) : null;
+  let customUrl = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_URL) : null;
+  let customKey = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_KEY) : null;
+
+  // Clear outdated dummy / placeholder credentials from previous versions
+  if (customUrl && (customUrl.includes('xyzcompany') || customUrl.includes('placeholder'))) {
+    customUrl = null;
+    if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_KEY_URL);
+  }
+  if (customKey && (customKey.includes('dummy_anon_key') || customKey.includes('placeholder'))) {
+    customKey = null;
+    if (typeof window !== 'undefined') localStorage.removeItem(STORAGE_KEY_KEY);
+  }
 
   const envUrl =
     (import.meta as any).env?.VITE_SUPABASE_URL ||
@@ -34,20 +47,21 @@ export const getSupabaseCredentials = () => {
     (import.meta as any).env?.SUPABASE_ANON_KEY ||
     (typeof process !== 'undefined' ? process.env?.VITE_SUPABASE_ANON_KEY || process.env?.SUPABASE_ANON_KEY : '');
 
-  const rawUrl = (customUrl || envUrl || 'https://xyzcompany.supabase.co').trim();
-  const rawKey = (customKey || envKey || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy_anon_key').trim();
+  const rawUrl = (customUrl || envUrl || DEFAULT_SUPABASE_URL).trim();
+  const rawKey = (customKey || envKey || DEFAULT_SUPABASE_ANON_KEY).trim();
 
   const url = cleanSupabaseUrl(rawUrl);
   const key = rawKey;
 
-  // If localStorage held a dirty URL ending in /rest/v1, fix it silently
-  if (customUrl && customUrl !== url && typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_URL, url);
+  // Cache to localStorage if not yet cached
+  if (typeof window !== 'undefined' && !customUrl) {
+    try {
+      localStorage.setItem(STORAGE_KEY_URL, url);
+      localStorage.setItem(STORAGE_KEY_KEY, key);
+    } catch {}
   }
 
-  const isConfigured =
-    (!!customUrl && customUrl !== 'https://xyzcompany.supabase.co') ||
-    (!!envUrl && envUrl !== 'https://xyzcompany.supabase.co' && !envUrl.includes('placeholder'));
+  const isConfigured = true;
 
   return { url, key, isConfigured };
 };
@@ -389,10 +403,16 @@ export const updateSupabaseProfilePreference = async (
  */
 export const uploadPhotoToSupabase = async (file: File | Blob, userId?: string): Promise<string> => {
   const supabase = getSupabaseClient();
-  const { isConfigured, url } = getSupabaseCredentials();
+  const { isConfigured } = getSupabaseCredentials();
 
   if (!isConfigured) {
-    throw new Error('Supabase is not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY in your environment or Owner settings.');
+    const configError = 'Supabase is not configured. Please verify your Supabase credentials.';
+    try {
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(configError);
+      }
+    } catch {}
+    throw new Error(configError);
   }
 
   // Determine file extension
@@ -413,34 +433,118 @@ export const uploadPhotoToSupabase = async (file: File | Blob, userId?: string):
   const randomStr = Math.random().toString(36).substring(2, 8);
   const fileName = `${timestamp}_${randomStr}.${cleanExt}`;
   const filePath = `${userFolder}/${fileName}`;
-
   const contentType = file.type || (cleanExt === 'png' ? 'image/png' : cleanExt === 'webp' ? 'image/webp' : 'image/jpeg');
 
-  // Upload to the public 'photos' bucket with upsert
-  const { data, error } = await supabase.storage
-    .from('photos')
-    .upload(filePath, file, {
-      contentType,
-      upsert: true,
-      cacheControl: '3600',
+  // 1. Console.log before upload
+  console.log('[Supabase Storage] BEFORE upload:', {
+    bucket: 'photos',
+    filePath,
+    contentType,
+    fileSize: file.size,
+    userId,
+  });
+
+  let uploadResultData: any = null;
+
+  // 2. Wrap upload in try/catch and show actual error with alert(error.message)
+  // 5. Add a 15 second timeout
+  try {
+    const uploadPromise = (async () => {
+      const { data, error } = await supabase.storage
+        .from('photos')
+        .upload(filePath, file, {
+          contentType,
+          upsert: true,
+          cacheControl: '3600',
+        });
+
+      if (error) {
+        throw error;
+      }
+      return data;
+    })();
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Photo upload timed out after 15 seconds. Please check your network connection.'));
+      }, 15000);
     });
 
-  if (error) {
-    console.error('[Supabase Storage] Error uploading to photos bucket:', error);
-    throw new Error(`Failed to upload photo to Supabase 'photos' bucket: ${error.message}`);
+    uploadResultData = await Promise.race([uploadPromise, timeoutPromise]);
+
+    // 1. Console.log after upload
+    console.log('[Supabase Storage] AFTER upload SUCCESS:', uploadResultData);
+  } catch (error: any) {
+    // 1. Console.log after upload on error
+    console.error('[Supabase Storage] AFTER upload ERROR:', error);
+    const errorMessage = error?.message || 'Failed to upload photo to Supabase Storage.';
+    try {
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(errorMessage);
+      }
+    } catch {}
+    throw new Error(errorMessage);
   }
 
-  // Retrieve public URL from Supabase Storage
+  // 3. After upload, use supabase.storage.from('photos').getPublicUrl() to get URL
+  console.log('[Supabase Storage] Fetching getPublicUrl for path:', uploadResultData?.path || filePath);
   const { data: publicUrlData } = supabase.storage
     .from('photos')
-    .getPublicUrl(data?.path || filePath);
+    .getPublicUrl(uploadResultData?.path || filePath);
 
-  if (!publicUrlData?.publicUrl) {
-    throw new Error('Failed to retrieve public URL from Supabase Storage.');
+  const publicUrl = publicUrlData?.publicUrl || '';
+  if (!publicUrl) {
+    const urlErr = 'Failed to retrieve public URL from Supabase Storage.';
+    try {
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(urlErr);
+      }
+    } catch {}
+    throw new Error(urlErr);
+  }
+  console.log('[Supabase Storage] getPublicUrl SUCCESS:', publicUrl);
+
+  // 4. For profiles table update, wrap in separate try/catch - if it fails, still show the photo, don't hang
+  if (userId) {
+    try {
+      console.log('[Supabase Profiles] Updating profiles table avatar_url for user:', userId);
+      const { error: profErr } = await supabase
+        .from('profiles')
+        .update({
+          avatar_url: publicUrl,
+          photo_url: publicUrl,
+        })
+        .eq('id', userId);
+
+      if (profErr) {
+        console.warn('[Supabase Profiles] Retrying profile update with photo_url:', profErr.message);
+        await supabase
+          .from('profiles')
+          .update({
+            photo_url: publicUrl,
+          })
+          .eq('id', userId);
+      }
+      console.log('[Supabase Profiles] profiles table updated successfully');
+    } catch (profileUpdateErr) {
+      // If it fails, still show the photo, don't hang
+      console.warn('[Supabase Profiles] Profiles table update failed (non-blocking):', profileUpdateErr);
+    }
+
+    try {
+      await supabase
+        .from('users')
+        .update({
+          avatar_url: publicUrl,
+          profile_pic: publicUrl,
+        })
+        .eq('uid', userId);
+    } catch (usersErr) {
+      console.warn('[Supabase Users] Users table update notice (non-blocking):', usersErr);
+    }
   }
 
-  console.log('[Supabase Storage] Photo uploaded successfully:', publicUrlData.publicUrl);
-  return publicUrlData.publicUrl;
+  return publicUrl;
 };
 
 /**

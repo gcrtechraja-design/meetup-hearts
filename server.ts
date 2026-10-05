@@ -6,15 +6,12 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Port configured by Cloud Run (default: 8080 or 3000)
-const PORT = parseInt(process.env.PORT || '3000', 10);
-
 async function startServer() {
   const app = express();
   app.use(express.json());
 
-  // Health check endpoints for Cloud Run startup and liveness probes
-  app.get(['/health', '/healthz', '/_ah/health'], (req, res) => {
+  // Health check endpoints for Cloud Run startup and liveness probes (MUST respond 200 OK immediately)
+  app.get(['/health', '/healthz', '/_ah/health', '/ping'], (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
@@ -64,31 +61,38 @@ async function startServer() {
     });
   }
 
-  // Primary listener: MUST listen on PORT (required by Cloud Run & container runtime)
-  const primaryServer = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] Primary server listening on http://0.0.0.0:${PORT}`);
+  // 1. Primary listener: Port 3000 (Target port for AI Studio & Nginx reverse proxy)
+  const primaryServer = app.listen(3000, '0.0.0.0', () => {
+    console.log('[Server] Application listening on http://0.0.0.0:3000');
   });
 
-  primaryServer.on('error', (err) => {
-    console.error(`[Server] Error on port ${PORT}:`, err);
+  primaryServer.on('error', (err: any) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.log('[Server] Port 3000 is already in use by an active server.');
+    } else {
+      console.error('[Server] Port 3000 error:', err);
+    }
   });
 
-  // Secondary listener: if PORT is not 3000, also bind to 3000 for internal proxies
-  if (PORT !== 3000) {
+  // 2. Secondary listener: If process.env.PORT is configured and is NOT 3000 (e.g. Cloud Run 8080)
+  // In environments with Nginx reverse proxy, port 8080 is owned by Nginx which forwards to 3000.
+  // In environments without Nginx, binding here ensures direct Cloud Run compatibility.
+  const envPort = parseInt(process.env.PORT || '', 10);
+  if (envPort && envPort !== 3000) {
     try {
-      const internalServer = app.listen(3000, '0.0.0.0', () => {
-        console.log(`[Server] Also listening on port 3000 for internal proxies`);
+      const altServer = app.listen(envPort, '0.0.0.0', () => {
+        console.log(`[Server] Also listening on http://0.0.0.0:${envPort}`);
       });
 
-      internalServer.on('error', (err: any) => {
+      altServer.on('error', (err: any) => {
         if (err && err.code === 'EADDRINUSE') {
-          console.log('[Server] Port 3000 already in use, proceeding...');
+          console.log(`[Server] Port ${envPort} is managed by Nginx proxy. Traffic is being forwarded to port 3000.`);
         } else {
-          console.warn('[Server] Port 3000 notice:', err);
+          console.warn(`[Server] Port ${envPort} notice:`, err?.message || err);
         }
       });
-    } catch {
-      // Ignore internal proxy bind error
+    } catch (e: any) {
+      console.warn(`[Server] Could not bind port ${envPort}:`, e?.message || e);
     }
   }
 }
