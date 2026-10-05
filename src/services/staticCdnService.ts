@@ -83,6 +83,16 @@ export function getUserAvatarUrl(user?: {
   photoURL?: string;
   email?: string;
 } | null): string {
+  // Check localStorage for offline/locally saved avatar first!
+  if (typeof window !== 'undefined') {
+    if (user?.uid) {
+      const userSpecific = localStorage.getItem(`meetup_avatar_${user.uid}`);
+      if (userSpecific && userSpecific.trim()) return userSpecific;
+    }
+    const localAvatar = localStorage.getItem('meetup_user_avatar');
+    if (localAvatar && localAvatar.trim()) return localAvatar;
+  }
+
   if (!user) {
     return getConsistentListenerAvatar('guest');
   }

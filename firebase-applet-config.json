@@ -1,12 +1,12 @@
 {
   "projectId": "love-meet-up-e6c44",
-  "appId": "1:784624448183:web:2c7a3281486df30acc5332",
+  "appId": "1:784624448183:web:06f1ea30945922e5cc5332",
   "apiKey": "AIzaSyC-ckEoRZdPtd1ulrvdRckt88UXVwEGbbs",
   "authDomain": "love-meet-up-e6c44.firebaseapp.com",
-  "firestoreDatabaseId": "(default)",
+  "firestoreDatabaseId": "ai-studio-remixremixmeetup-0491e31b-8282-4c08-89d9-df41e4fe9a50",
   "storageBucket": "love-meet-up-e6c44.firebasestorage.app",
   "messagingSenderId": "784624448183",
   "measurementId": "",
-  "oAuthClientId": "",
+  "oAuthClientId": "784624448183-916a1ima5usodjsor34dt2293khst50i.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

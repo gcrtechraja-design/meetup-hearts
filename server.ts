@@ -6,34 +6,25 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Port configured by Cloud Run (default: 8080) or local environment
+const PORT = parseInt(process.env.PORT || '8080', 10);
+
 async function startServer() {
   const app = express();
   app.use(express.json());
 
-  // Health check endpoints for Cloud Run startup and liveness probes (MUST respond 200 OK immediately)
+  // 1. Health check endpoints - must respond 200 OK immediately for Cloud Run deployment probes
   app.get(['/health', '/healthz', '/_ah/health', '/ping'], (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Call push notification endpoint
+  // 2. Call push notification endpoint
   app.post('/api/send-call-push', (req, res) => {
     res.status(200).json({ success: true, delivered: true });
   });
 
   const distPath = path.join(__dirname, 'dist');
   const indexHtmlPath = path.join(distPath, 'index.html');
-
-  // Verify dist directory and index.html exist
-  if (!fs.existsSync(distPath) || !fs.existsSync(indexHtmlPath)) {
-    console.log('[Server] Production dist bundle missing. Building via vite build...');
-    try {
-      const { execSync } = await import('child_process');
-      execSync('npx vite build', { stdio: 'inherit' });
-      console.log('[Server] Production build completed.');
-    } catch (buildErr) {
-      console.error('[Server] Vite build error:', buildErr);
-    }
-  }
 
   if (fs.existsSync(distPath) && fs.existsSync(indexHtmlPath)) {
     // Serve production static assets from dist
@@ -50,51 +41,51 @@ async function startServer() {
     app.get('*', (req, res) => {
       res.sendFile(indexHtmlPath, (err) => {
         if (err && !res.headersSent) {
-          res.status(200).send('<!DOCTYPE html><html><head><title>Meet Up</title></head><body>Loading application...</body></html>');
+          res.status(200).send('<!DOCTYPE html><html><head><title>Remix Remix Meet Up</title></head><body>Loading application...</body></html>');
         }
       });
     });
   } else {
-    // Graceful startup fallback that always returns 200 OK to satisfy Cloud Run probes
+    // Immediate fallback response satisfying Cloud Run health check if dist is building
     app.get('*', (req, res) => {
-      res.status(200).send('<!DOCTYPE html><html><head><title>Meet Up</title></head><body><h3>Meet Up Application is starting... Please refresh shortly.</h3></body></html>');
+      res.status(200).send('<!DOCTYPE html><html><head><title>Remix Remix Meet Up</title></head><body><h3>Remix Remix Meet Up is starting... Please refresh shortly.</h3></body></html>');
     });
   }
 
-  // 1. Primary listener: Port 3000 (Target port for AI Studio & Nginx reverse proxy)
-  const primaryServer = app.listen(3000, '0.0.0.0', () => {
-    console.log('[Server] Application listening on http://0.0.0.0:3000');
+  // 1. Main listener: Listen on Cloud Run PORT (0.0.0.0:$PORT)
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] Primary server listening on http://0.0.0.0:${PORT}`);
   });
 
-  primaryServer.on('error', (err: any) => {
+  server.on('error', (err: any) => {
     if (err && err.code === 'EADDRINUSE') {
-      console.log('[Server] Port 3000 is already in use by an active server.');
+      console.log(`[Server] Port ${PORT} is already bound by host proxy (e.g. Nginx). Requests are forwarded to port 3000.`);
     } else {
-      console.error('[Server] Port 3000 error:', err);
+      console.error(`[Server] Error on port ${PORT}:`, err);
     }
   });
 
-  // 2. Secondary listener: If process.env.PORT is configured and is NOT 3000 (e.g. Cloud Run 8080)
-  // In environments with Nginx reverse proxy, port 8080 is owned by Nginx which forwards to 3000.
-  // In environments without Nginx, binding here ensures direct Cloud Run compatibility.
-  const envPort = parseInt(process.env.PORT || '', 10);
-  if (envPort && envPort !== 3000) {
+  // 2. Secondary listener: Also listen on port 3000 if PORT is not 3000 (covers Nginx reverse proxy routing)
+  if (PORT !== 3000) {
     try {
-      const altServer = app.listen(envPort, '0.0.0.0', () => {
-        console.log(`[Server] Also listening on http://0.0.0.0:${envPort}`);
+      const internalServer = app.listen(3000, '0.0.0.0', () => {
+        console.log('[Server] Secondary listener active on http://0.0.0.0:3000');
       });
 
-      altServer.on('error', (err: any) => {
+      internalServer.on('error', (err: any) => {
         if (err && err.code === 'EADDRINUSE') {
-          console.log(`[Server] Port ${envPort} is managed by Nginx proxy. Traffic is being forwarded to port 3000.`);
+          console.log('[Server] Port 3000 is already active.');
         } else {
-          console.warn(`[Server] Port ${envPort} notice:`, err?.message || err);
+          console.warn('[Server] Port 3000 notice:', err?.message || err);
         }
       });
     } catch (e: any) {
-      console.warn(`[Server] Could not bind port ${envPort}:`, e?.message || e);
+      console.warn('[Server] Could not start port 3000 listener:', e?.message || e);
     }
   }
+
+  // Keep the process alive indefinitely so Cloud Run container does not exit
+  setInterval(() => {}, 1000 * 60 * 60);
 }
 
 startServer().catch((err) => {

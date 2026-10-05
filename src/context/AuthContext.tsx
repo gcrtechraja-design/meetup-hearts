@@ -34,6 +34,7 @@ import { getDefaultFemaleAvatar } from '../services/staticCdnService';
 import { requestNotificationPermissionAndSaveToken, initFCM } from '../services/fcmService';
 import { findCity } from '../utils/cities';
 import { hashPassword } from '../utils/crypto';
+import { loadCoins } from '../utils/coins';
 import { 
   getSupabaseClient,
   getSupabaseCredentials,
@@ -168,10 +169,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     unsubscribeSnapshotRef.current = onSnapshot(userDocRef, (docSnapshot) => {
       if (docSnapshot.exists()) {
         const rawData = (docSnapshot.data() || {}) as Partial<UserProfile>;
+        const localCoins = loadCoins();
         const data: UserProfile = {
           ...rawData,
           uid: rawData.uid || docSnapshot.id || uid,
           id: (rawData as any).id || docSnapshot.id || uid,
+          coins_balance: localCoins,
         } as UserProfile;
         const isAdmin = isAdminEmail(data.email);
         if (isAdmin && (data.role !== 'admin' || !data.is_admin)) {
@@ -372,7 +375,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           role: isAdmin ? 'admin' : 'user',
           is_admin: isAdmin,
           isAdmin: isAdmin,
-          coins_balance: isAdmin ? 9999 : 50,
+          coins_balance: loadCoins(),
           diamonds_balance: isAdmin ? 500 : 0,
           voice_rate: AUDIO_COIN_PER_MINUTE,
           video_rate: VIDEO_COIN_PER_MINUTE,

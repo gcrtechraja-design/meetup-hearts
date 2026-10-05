@@ -14,8 +14,8 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [experience, setExperience] = useState('');
   const [languages, setLanguages] = useState<string[]>(['Tamil', 'English']);
-  const [voiceRate, setVoiceRate] = useState<number>(10);
-  const [videoRate, setVideoRate] = useState<number>(50);
+  const [voiceRate, setVoiceRate] = useState<number>(2);
+  const [videoRate, setVideoRate] = useState<number>(10);
   const [allowVideoCalls, setAllowVideoCalls] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -57,8 +57,8 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
         avatar_url: assignedPic,
         languages: languages.length > 0 ? languages : ['Tamil', 'English'],
         experience: experience.trim() || 'Friendly listener',
-        voice_rate: Number(voiceRate) || 10,
-        video_rate: Number(videoRate) || 50,
+        voice_rate: Number(voiceRate) ?? 2,
+        video_rate: Number(videoRate) ?? 10,
         allowVideoCalls: Boolean(allowVideoCalls),
         status: 'pending',
         created_at: serverTimestamp(),
@@ -255,10 +255,10 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
                     </label>
                     <input
                       type="range"
-                      min="10"
-                      max="30"
+                      min="0"
+                      max="5"
                       value={voiceRate}
-                      onChange={(e) => setVoiceRate(Number(e.target.value))}
+                      onChange={(e) => setVoiceRate(Math.min(5, Math.max(0, Number(e.target.value))))}
                       className="w-full accent-[#FF69B4]"
                     />
                   </div>
@@ -270,10 +270,10 @@ export const ListenerApplicationModal: React.FC<ListenerApplicationModalProps> =
                       </label>
                       <input
                         type="range"
-                        min="40"
-                        max="90"
+                        min="0"
+                        max="20"
                         value={videoRate}
-                        onChange={(e) => setVideoRate(Number(e.target.value))}
+                        onChange={(e) => setVideoRate(Math.min(20, Math.max(0, Number(e.target.value))))}
                         className="w-full accent-[#FF69B4]"
                       />
                     </div>

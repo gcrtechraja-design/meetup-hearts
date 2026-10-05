@@ -41,6 +41,7 @@ import { db, auth } from '../firebase/config';
 import { isListenerOffline } from '../utils/presence';
 import { CITIES, findCity } from '../utils/cities';
 import { isUserAdmin, isMeetupOwner } from '../utils/admin';
+import { loadCoins } from '../utils/coins';
 import appLogo from '../assets/images/app_logo_1790170748297.jpg';
 
 interface ProfileViewProps {
@@ -432,39 +433,30 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
   };
 
-  // Save selected avatar (3D avatar or uploaded pic) to Firestore user profile
-  const handleSaveAvatar = async (avatarUrl: string) => {
-    if (!currentUser) {
-      setUploadNotice('Please login to update your avatar.');
-      return;
+  // 2. Create function saveAvatar(url) that ONLY does localStorage.setItem('meetup_avatar', url) and updates the <img> src.
+  // Do NOT touch coins, do NOT call Firestore, do NOT call any profile save function.
+  const [displayedAvatar, setDisplayedAvatar] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('meetup_avatar') || localStorage.getItem('meetup_user_avatar');
+      if (saved && saved.trim()) return saved;
     }
-    setUploadingPic(true);
-    setUploadNotice(null);
-    try {
-      const userDocRef = doc(db, 'users', currentUser.uid);
-      await setDoc(userDocRef, {
-        profile_pic: avatarUrl,
-        avatar_url: avatarUrl,
-        avatar: avatarUrl,
-        photoURL: avatarUrl,
-        updated_at: serverTimestamp(),
-      }, { merge: true });
+    return getUserAvatarUrl(currentUser);
+  });
 
-      if (auth.currentUser) {
-        try {
-          await updateProfile(auth.currentUser, { photoURL: avatarUrl });
-        } catch {}
-      }
-
-      setUploadNotice('Avatar updated successfully!');
-      setTimeout(() => setUploadNotice(null), 3500);
-    } catch (err: any) {
-      console.error('[ProfileView] Failed to update avatar in Firestore:', err);
-      setUploadNotice(err?.message || 'Failed to update avatar.');
-      throw err;
-    } finally {
-      setUploadingPic(false);
+  const saveAvatar = async (url: string) => {
+    if (!url) return;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('meetup_avatar', url);
+      localStorage.setItem('meetup_user_avatar', url);
     }
+    setDisplayedAvatar(url);
+    setShowAvatarSheet(false);
+    setUploadNotice('Avatar updated successfully!');
+    setTimeout(() => setUploadNotice(null), 3000);
+  };
+
+  const handleSaveAvatar = (avatarUrl: string) => {
+    saveAvatar(avatarUrl);
   };
 
   // Save updated name to Firestore user profile and sync auth display name
@@ -517,7 +509,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             title="Change Profile Picture"
           >
             <img
-              src={cdnAvatarUrl}
+              src={displayedAvatar || cdnAvatarUrl}
               alt={currentUser?.name}
               className="w-16 h-16 rounded-full object-cover border-2 border-[#FF69B4] shadow-[0_0_12px_rgba(255,105,180,0.4)] group-hover:brightness-90 transition"
             />
@@ -831,7 +823,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             <div>
               <span className="text-[11px] text-zinc-400 block font-medium">Coin Balance</span>
               <span className="text-lg font-black text-amber-300">
-                {(currentUser?.coins_balance ?? currentUser?.coin_balance ?? 0).toLocaleString()}
+                {loadCoins().toLocaleString()}
               </span>
             </div>
             <div className="w-7 h-7 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center">
@@ -1298,12 +1290,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       <AvatarPickerBottomSheet
         isOpen={showAvatarSheet}
         onClose={() => setShowAvatarSheet(false)}
-        currentAvatarUrl={cdnAvatarUrl}
+        currentAvatarUrl={displayedAvatar || cdnAvatarUrl}
         onUploadFromDevice={() => {
           setShowAvatarSheet(false);
           fileInputRef.current?.click();
         }}
-        onSaveAvatar={handleSaveAvatar}
+        onSaveAvatar={saveAvatar}
         initialView={sheetInitialView}
       />
     </div>

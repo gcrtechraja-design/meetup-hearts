@@ -3,6 +3,7 @@ import { X, Coins, Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { CoinStorePlan } from '../services/paymentService';
 import { ManualPaymentPopup } from './ManualPaymentPopup';
+import { loadCoins } from '../utils/coins';
 
 export const ADMIN_UPI_ID = 'rajasuvimarriage09-1@okhdfcbank';
 export const ADMIN_NAME = 'MeetUp';
@@ -138,7 +139,7 @@ export const WalletModal: React.FC<WalletModalProps> = ({ onClose }) => {
             <span className="text-[11px] text-zinc-400 font-medium">Your Current Balance</span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
               <span className="text-2xl sm:text-3xl font-black text-amber-300">
-                {(currentUser?.coins_balance ?? currentUser?.coin_balance ?? 0).toLocaleString()}
+                {loadCoins().toLocaleString()}
               </span>
               <span className="text-xs text-amber-400 font-bold">Coins</span>
             </div>

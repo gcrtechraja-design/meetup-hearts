@@ -25,7 +25,7 @@ interface AvatarPickerBottomSheetProps {
   onClose: () => void;
   currentAvatarUrl?: string;
   onUploadFromDevice: () => void;
-  onSaveAvatar: (avatarUrl: string) => Promise<void>;
+  onSaveAvatar: (avatarUrl: string) => void | Promise<void>;
   initialView?: 'menu' | 'avatars';
 }
 
@@ -72,19 +72,28 @@ export const AvatarPickerBottomSheet: React.FC<AvatarPickerBottomSheetProps> = (
     setSelectedAvatar(pool[randomIndex]);
   };
 
-  const handleConfirmSave = async () => {
+  const handleConfirmSave = () => {
     if (!selectedAvatar?.url) return;
     setSaving(true);
     setErrorToast(null);
+
+    // 1. When user clicks "Set as Avatar", save avatar to localStorage only
     try {
-      await onSaveAvatar(selectedAvatar.url);
-      onClose();
-    } catch (err: any) {
-      console.error('[AvatarPicker] Failed to save avatar:', err);
-      setErrorToast(err?.message || 'Failed to save avatar. Please try again.');
-    } finally {
-      setSaving(false);
+      localStorage.setItem('meetup_avatar', selectedAvatar.url);
+      localStorage.setItem('meetup_user_avatar', selectedAvatar.url);
+      localStorage.setItem('meetup_selected_avatar', JSON.stringify(selectedAvatar));
+    } catch (e) {
+      console.warn('[AvatarPicker] localStorage write notice:', e);
     }
+
+    try {
+      onSaveAvatar(selectedAvatar.url);
+    } catch (err: any) {
+      console.warn('[AvatarPicker] save notice:', err);
+    }
+
+    setSaving(false);
+    onClose();
   };
 
   // Filter avatars based on gender and search query
